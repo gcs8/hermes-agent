@@ -553,6 +553,87 @@ def _image_meta(path: Path) -> dict:
     return meta
 
 
+_IMAGE_UPLOAD_MAX_BYTES = 16 * 1024 * 1024
+_IMAGE_UPLOAD_MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
+_IMAGE_UPLOAD_EXTENSIONS = frozenset(_IMAGE_UPLOAD_MIME_EXTENSIONS.values())
+
+
+def _decode_image_upload_data_url(data_url: str) -> tuple[bytes, str]:
+    raw = str(data_url or "").strip()
+    if not raw:
+        raise ValueError("image data URL required")
+
+    header, sep, payload = raw.partition(",")
+    lower_header = header.lower()
+    if not sep or not lower_header.startswith("data:image/"):
+        raise ValueError("image.upload requires an image data URL")
+    if "base64" not in lower_header.split(";")[1:]:
+        raise ValueError("image.upload requires a base64 image data URL")
+
+    mime = lower_header[5:].split(";", 1)[0]
+    ext = _IMAGE_UPLOAD_MIME_EXTENSIONS.get(mime)
+    if not ext:
+        raise ValueError(f"unsupported image data URL type: {mime}")
+
+    encoded = payload.strip()
+    if (len(encoded) * 3) // 4 > _IMAGE_UPLOAD_MAX_BYTES + 3:
+        raise ValueError("uploaded image is too large")
+
+    import base64
+    import binascii
+
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid image data URL base64 payload") from exc
+
+    if len(data) > _IMAGE_UPLOAD_MAX_BYTES:
+        raise ValueError("uploaded image is too large")
+    return data, ext
+
+
+def _decode_image_upload_base64(content_base64: str) -> bytes:
+    encoded = str(content_base64 or "").strip()
+    if not encoded:
+        raise ValueError("image.attach_bytes requires content_base64")
+    if (len(encoded) * 3) // 4 > _IMAGE_UPLOAD_MAX_BYTES + 3:
+        raise ValueError("uploaded image is too large")
+
+    import base64
+    import binascii
+
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid image.attach_bytes base64 payload") from exc
+
+    if len(data) > _IMAGE_UPLOAD_MAX_BYTES:
+        raise ValueError("uploaded image is too large")
+    return data
+
+
+def _image_upload_ext_from_filename(filename: str) -> str:
+    suffix = Path(str(filename or "")).suffix.lower()
+    if suffix in _IMAGE_UPLOAD_EXTENSIONS:
+        return suffix
+    return ".png"
+
+
+def _cache_uploaded_image_for_session(session: dict, data: bytes, ext: str) -> Path:
+    from gateway.platforms.base import cache_image_from_bytes
+
+    image_path = Path(cache_image_from_bytes(data, ext))
+    session.setdefault("attached_images", []).append(str(image_path))
+    return image_path
+
+
 def _ok(rid, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": rid, "result": result}
 
@@ -5052,6 +5133,56 @@ def _(rid, params: dict) -> dict:
             **_image_meta(img_path),
         },
     )
+
+
+def _image_upload_result(rid, session: dict, image_path: Path) -> dict:
+    return _ok(
+        rid,
+        {
+            "attached": True,
+            "path": str(image_path),
+            "count": len(session["attached_images"]),
+            "text": f"[User attached image: {image_path.name}]",
+            **_image_meta(image_path),
+        },
+    )
+
+
+@method("image.upload")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    assert session is not None
+
+    try:
+        data, ext = _decode_image_upload_data_url(str(params.get("data_url", "") or ""))
+        image_path = _cache_uploaded_image_for_session(session, data, ext)
+    except ValueError as exc:
+        return _err(rid, 4016, str(exc))
+    except Exception as exc:
+        return _err(rid, 5027, str(exc))
+
+    return _image_upload_result(rid, session, image_path)
+
+
+@method("image.attach_bytes")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    assert session is not None
+
+    try:
+        data = _decode_image_upload_base64(str(params.get("content_base64", "") or ""))
+        ext = _image_upload_ext_from_filename(str(params.get("filename", "") or ""))
+        image_path = _cache_uploaded_image_for_session(session, data, ext)
+    except ValueError as exc:
+        return _err(rid, 4016, str(exc))
+    except Exception as exc:
+        return _err(rid, 5027, str(exc))
+
+    return _image_upload_result(rid, session, image_path)
 
 
 @method("image.attach")

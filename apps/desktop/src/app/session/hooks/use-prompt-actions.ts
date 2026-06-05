@@ -34,6 +34,7 @@ import { requestDesktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   $busy,
+  $connection,
   $messages,
   $yoloActive,
   setAwaitingResponse,
@@ -78,6 +79,143 @@ function inlineErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
 
   return (raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw).replace(/^Error:\s*/, '').trim()
+}
+
+function isImageDataUrl(value: string | undefined): value is string {
+  return /^data:image\/[a-z0-9.+-]+;base64,/i.test(value || '')
+}
+
+function imageDataUrlContentBase64(dataUrl: string): string {
+  const match = dataUrl.match(/^data:image\/[a-z0-9.+-]+;base64,(.+)$/i)
+  const contentBase64 = match?.[1]?.trim()
+
+  if (!contentBase64) {
+    throw new Error('image data URL did not include base64 content')
+  }
+
+  return contentBase64
+}
+
+function imageAttachPathMissing(error: unknown): boolean {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : typeof (error as { message?: unknown } | null)?.message === 'string'
+          ? String((error as { message: unknown }).message)
+          : ''
+
+  return /image not found:/i.test(raw)
+}
+
+function gatewayMethodUnknown(error: unknown, method: string): boolean {
+  return inlineErrorMessage(error, '').toLowerCase().includes(`unknown method: ${method.toLowerCase()}`)
+}
+
+async function attachmentDataUrl(attachment: ComposerAttachment, attachError: unknown): Promise<string> {
+  if (isImageDataUrl(attachment.previewUrl)) {
+    return attachment.previewUrl
+  }
+
+  const readFileDataUrl = typeof window !== 'undefined' ? window.hermesDesktop?.readFileDataUrl : undefined
+  const label = attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image')
+
+  if (!attachment.path || !readFileDataUrl) {
+    throw new Error(
+      `Could not upload ${label} to the remote gateway because the desktop image bytes are unavailable: ${inlineErrorMessage(
+        attachError,
+        'image not found'
+      )}`
+    )
+  }
+
+  try {
+    const dataUrl = await readFileDataUrl(attachment.path)
+
+    if (isImageDataUrl(dataUrl)) {
+      return dataUrl
+    }
+
+    throw new Error('file preview was not an image data URL')
+  } catch (readError) {
+    throw new Error(
+      `Could not upload ${label} to the remote gateway: ${inlineErrorMessage(readError, 'local image read failed')}`
+    )
+  }
+}
+
+async function uploadImageForSubmit(
+  sessionId: string,
+  attachment: ComposerAttachment,
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>,
+  attachError: unknown
+): Promise<ImageAttachResponse> {
+  const dataUrl = await attachmentDataUrl(attachment, attachError)
+  const filename = attachment.path ? pathLabel(attachment.path) : attachment.label || 'image.png'
+
+  try {
+    return await requestGateway<ImageAttachResponse>('image.upload', {
+      data_url: dataUrl,
+      filename,
+      session_id: sessionId
+    })
+  } catch (uploadError) {
+    if (gatewayMethodUnknown(uploadError, 'image.upload')) {
+      try {
+        return await requestGateway<ImageAttachResponse>('image.attach_bytes', {
+          content_base64: imageDataUrlContentBase64(dataUrl),
+          filename,
+          session_id: sessionId
+        })
+      } catch (attachBytesError) {
+        throw new Error(
+          `Could not upload ${filename} to the remote gateway: ${inlineErrorMessage(
+            attachBytesError,
+            inlineErrorMessage(uploadError, 'image upload failed')
+          )}`
+        )
+      }
+    }
+
+    throw new Error(
+      `Could not upload ${filename} to the remote gateway: ${inlineErrorMessage(uploadError, 'image upload failed')}`
+    )
+  }
+}
+
+export async function attachImageForSubmit(
+  sessionId: string,
+  attachment: ComposerAttachment,
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>,
+  options: { preferUpload?: boolean } = {}
+): Promise<ImageAttachResponse> {
+  let attachError: unknown = null
+
+  if (options.preferUpload) {
+    return uploadImageForSubmit(sessionId, attachment, requestGateway, new Error('remote gateway image upload preferred'))
+  }
+
+  try {
+    const result = await requestGateway<ImageAttachResponse>('image.attach', {
+      session_id: sessionId,
+      path: attachment.path
+    })
+
+    if (result.attached !== false || !imageAttachPathMissing(result.message)) {
+      return result
+    }
+
+    attachError = new Error(result.message || 'image not found')
+  } catch (error) {
+    if (!imageAttachPathMissing(error)) {
+      throw error
+    }
+
+    attachError = error
+  }
+
+  return uploadImageForSubmit(sessionId, attachment, requestGateway, attachError)
 }
 
 interface PromptActionsOptions {
@@ -203,9 +341,8 @@ export function usePromptActions({
           continue
         }
 
-        const result = await requestGateway<ImageAttachResponse>('image.attach', {
-          session_id: sessionId,
-          path: attachment.path
+        const result = await attachImageForSubmit(sessionId, attachment, requestGateway, {
+          preferUpload: $connection.get()?.mode === 'remote'
         })
 
         if (!result.attached) {
