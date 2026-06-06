@@ -543,6 +543,37 @@ def test_cmd_update_no_reset_when_ff_only_succeeds(monkeypatch, tmp_path):
     assert len(reset_calls) == 0
 
 
+def test_cmd_update_explicit_branch_uses_tracking_remote_when_not_origin(monkeypatch, tmp_path):
+    """An explicit hotfix branch tracking fork/<branch> must not consult stale origin/<branch>."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    branch = "ryoko/desktop-remote-upload-content-length"
+    recorded = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(cmd)
+        if cmd == ["git", "fetch", "origin"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return SimpleNamespace(stdout=f"{branch}\n", stderr="", returncode=0)
+        if cmd == ["git", "for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"]:
+            return SimpleNamespace(stdout=f"fork/{branch}\n", stderr="", returncode=0)
+        if cmd == ["git", "fetch", "fork", f"+refs/heads/{branch}:refs/remotes/fork/{branch}"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", f"HEAD..fork/{branch}", "--count"]:
+            return SimpleNamespace(stdout="0\n", stderr="", returncode=0)
+        if cmd == ["git", "remote"]:
+            return SimpleNamespace(stdout="origin\nfork\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    hermes_main.cmd_update(SimpleNamespace(branch=branch, yes=True))
+
+    rev_list_calls = [cmd for cmd in recorded if "rev-list" in cmd]
+    assert rev_list_calls == [["git", "rev-list", f"HEAD..fork/{branch}", "--count"]]
+
+
 # ---------------------------------------------------------------------------
 # Non-main branch → auto-checkout main
 # ---------------------------------------------------------------------------

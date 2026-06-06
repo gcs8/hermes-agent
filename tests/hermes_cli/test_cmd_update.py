@@ -220,6 +220,7 @@ class TestCmdUpdateBranchFallback:
         import subprocess as _subprocess
         build_ok = _subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch.object(hm, "_is_termux_env", return_value=False), \
+             patch.object(hm, "_web_ui_build_needed", return_value=True), \
              patch.object(hm, "_run_with_idle_timeout", return_value=build_ok) as mock_idle:
             cmd_update(mock_args)
 
@@ -607,7 +608,7 @@ class TestCmdUpdateBranchFlag:
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_branch_flag_fails_when_branch_missing_everywhere(self, mock_run, _mock_which, capsys):
-        """If branch doesn't exist locally OR on origin, exit non-zero with clear error."""
+        """If branch doesn't exist locally OR on any configured remote, exit non-zero clearly."""
         mock_run.side_effect = self._branch_side_effect(
             current_branch="main",
             target_branch="nonexistent",
@@ -622,7 +623,7 @@ class TestCmdUpdateBranchFlag:
         assert exc_info.value.code == 1
 
         out = capsys.readouterr().out
-        assert "does not exist locally or on origin" in out
+        assert "does not exist locally or on a configured remote" in out
         assert "nonexistent" in out
 
 
@@ -700,6 +701,37 @@ class TestCmdUpdateCheckBranchFlag:
         rev_list_cmds = [c for c in commands if "rev-list" in c]
         assert any("origin/bb/gui" in c for c in rev_list_cmds), rev_list_cmds
         assert not any("origin/main" in c for c in rev_list_cmds), rev_list_cmds
+
+    @patch("hermes_cli.config.detect_install_method", return_value="git")
+    @patch("subprocess.run")
+    def test_check_branch_uses_tracking_remote_when_not_origin(
+        self, mock_run, _mock_method, capsys
+    ):
+        """--check --branch should follow a local branch's fork upstream."""
+        branch = "ryoko/desktop-remote-upload-content-length"
+
+        def side_effect(cmd, **kwargs):
+            if cmd == ["git", "for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"fork/{branch}\n", stderr="")
+            if cmd == ["git", "fetch", "fork", f"+refs/heads/{branch}:refs/remotes/fork/{branch}"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd == ["git", "rev-parse", "--verify", "--quiet", f"fork/{branch}"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd == ["git", "rev-list", f"HEAD..fork/{branch}", "--count"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+            if cmd == ["git", "remote"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="origin\nfork\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        args = SimpleNamespace(check=True, branch=branch)
+
+        cmd_update(args)
+
+        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+        rev_list_cmds = [c for c in commands if "rev-list" in c]
+        assert rev_list_cmds == [f"git rev-list HEAD..fork/{branch} --count"]
+        assert not any(f"origin/{branch}" in c for c in rev_list_cmds)
 
     @patch("hermes_cli.config.detect_install_method", return_value="git")
     @patch("subprocess.run")
