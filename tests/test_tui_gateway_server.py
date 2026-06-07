@@ -2616,6 +2616,84 @@ def test_image_attach_appends_local_image(monkeypatch):
     assert len(server._sessions["sid"]["attached_images"]) == 1
 
 
+def test_image_upload_caches_data_url_for_remote_gateway():
+    """Remote Desktop clients upload image bytes so the gateway stores a local path."""
+    server._sessions["sid"] = _session()
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "image.upload",
+                "params": {
+                    "session_id": "sid",
+                    "data_url": "data:image/png;base64,iVBORw0KGgo=",
+                    "filename": "cat.png",
+                },
+            }
+        )
+
+        assert "error" not in resp, resp
+        result = resp["result"]
+        assert result["attached"] is True
+        assert result["path"].endswith(".png")
+        image_path = Path(result["path"])
+        assert image_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        assert server._sessions["sid"]["attached_images"] == [str(image_path)]
+    finally:
+        for path in server._sessions.get("sid", {}).get("attached_images", []):
+            Path(path).unlink(missing_ok=True)
+        server._sessions.pop("sid", None)
+
+
+def test_image_attach_bytes_caches_base64_for_legacy_remote_gateway_clients():
+    """Legacy fallback RPC accepts raw base64 plus filename extension."""
+    server._sessions["sid"] = _session()
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "image.attach_bytes",
+                "params": {
+                    "session_id": "sid",
+                    "content_base64": "iVBORw0KGgo=",
+                    "filename": "cat.png",
+                },
+            }
+        )
+
+        assert "error" not in resp, resp
+        result = resp["result"]
+        assert result["attached"] is True
+        assert result["path"].endswith(".png")
+        assert server._sessions["sid"]["attached_images"] == [result["path"]]
+    finally:
+        for path in server._sessions.get("sid", {}).get("attached_images", []):
+            Path(path).unlink(missing_ok=True)
+        server._sessions.pop("sid", None)
+
+
+def test_image_upload_rejects_non_image_data_url():
+    server._sessions["sid"] = _session()
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "image.upload",
+                "params": {
+                    "session_id": "sid",
+                    "data_url": "data:text/plain;base64,aGVsbG8=",
+                    "filename": "note.txt",
+                },
+            }
+        )
+
+        assert resp["error"]["code"] == 4016
+        assert "image data URL" in resp["error"]["message"]
+        assert server._sessions["sid"]["attached_images"] == []
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_image_attach_accepts_unquoted_screenshot_path_with_spaces(monkeypatch):
     screenshot = Path("/tmp/Screenshot 2026-04-21 at 1.04.43 PM.png")
     fake_cli = types.ModuleType("cli")
