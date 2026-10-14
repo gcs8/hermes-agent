@@ -57,6 +57,33 @@ _CONTROL_FAILURES = {
     "session.save": "session save failed", "session.compress": "session compression failed"}
 
 
+# Mid-turn correction routes -> (AIAgent method, wire status when accepted).
+_CORRECTION_ROUTES: dict[str, tuple[str, str]] = {
+    "session.steer": ("steer", "queued"), "session.redirect": ("redirect", "redirected")}
+
+
+def _apply_host_correction(server: Any, session: dict, route_name: str, text: str) -> str:
+    """Apply a parent-relayed steer/redirect to this child's live agent.
+
+    ``unavailable`` means the child cannot take it (no live agent, idle, compressing): the parent
+    then keeps its own fallback (queue). The child never queues a correction itself, because the
+    parent owns the next-turn queue.
+    """
+    verb, accepted_status = _CORRECTION_ROUTES[route_name]
+    agent = session.get("agent")
+    if (not text or agent is None or not session.get("running")
+            or server._session_compression_in_flight(session)):
+        return "unavailable"
+    if verb == "redirect" and getattr(agent, "_supports_active_turn_redirect", False) is not True:
+        return "unavailable"
+    if not hasattr(agent, verb):
+        return "unavailable"
+    response = server._apply_correction(None, session, verb, text, accepted_status)
+    if "error" in response:
+        return "unavailable"
+    return str((response.get("result") or {}).get("status") or "rejected")
+
+
 class ComputeHost:
     # frame ``type`` -> handler method name (resolved per call so monkeypatches take effect).
     _FRAME_HANDLERS: dict[str, str] = {
@@ -447,6 +474,9 @@ class ComputeHost:
                 self._reply("control.error", sid, request_id, message=error)
             elif route_name == "reload.mcp":
                 self._handle_reload_mcp({**frame, "type": "reload_mcp"})
+            elif route_name in _CORRECTION_ROUTES:
+                status = _apply_host_correction(server, session, route_name, str(frame.get("text") or ""))
+                self._reply("control.ack", sid, request_id, route_name=route_name, status=status)
             else:
                 ack = self._control_ack(server, frame, session)
                 if "error" in ack:
