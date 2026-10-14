@@ -421,6 +421,11 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     plain_text = _coerce_message_text(text).strip() if not image_paths and _is_text_only_busy_payload(text) else ""
     # Text-only corrections steer/redirect in place when supported; media payloads and older agents fall through to
     # the proven interrupt + queue path.
+    host_verb = {"steer": "steer", "interrupt": "redirect"}.get(mode)
+    if (plain_text and host_verb
+            and _forward_correction_to_compute_host(sid, session, host_verb, plain_text) in {"queued", "redirected"}):
+        # Isolated turn: the child's agent took it. Same reply shape as the in-process correction.
+        return _ok(rid, {"status": "steered" if host_verb == "steer" else "redirected"})
     if plain_text and agent is not None:
         supported = {
             "steer": hasattr(agent, "steer"),
