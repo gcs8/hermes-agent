@@ -432,7 +432,14 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "running": False, "session_key": key, "show_reasoning": _load_show_reasoning(), "source": source,
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "transport": current_transport() or _stdio_transport,
-            "auth_user_id": _transport_auth_user_id(current_transport())}
+            "auth_user_id": _transport_auth_user_id(current_transport()),
+            # #107924: under dashboard.turn_isolation the lazy-session gate in
+            # _session_uses_compute_host is otherwise defeated 50ms after create by
+            # _schedule_agent_build below — by prompt time agent is set and the gate
+            # returns False, so the turn runs in-process and never spawns the
+            # compute-host child. Eagerly mark host ownership so the gate routes the
+            # first prompt to the child; the child rebuilds the agent from history.
+            "_compute_host_active": _turn_isolation_enabled()}
         _register_session_cwd(_sessions[sid])
         if idem_key is not None:
             _idempotency_keys[idem_key] = (sid, now)
@@ -648,6 +655,10 @@ class _Resume:
             self.target, cols=self.cols, cwd=cwd, history=history, lease=None, source=source,
             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
             profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd), **extra)
+        # #107924 also affects normal Desktop resumes: the deferred 50ms pre-warm
+        # populates agent before the user's next prompt, defeating the same lazy gate.
+        # Preserve host ownership across the resumed runtime just as session.create does.
+        record["_compute_host_active"] = _turn_isolation_enabled()
         if follows_profile:
             record.update(follow_profile_config=True, composer_override_profile=(
                 model_config.get("composer_override_profile") if overrides and overrides.get("model_override") else None))
