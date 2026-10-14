@@ -47,6 +47,7 @@ from tools.vision_tools_history_budget import (
 from tools.vision_tools_image_prep import (
     _VISION_MAX_VALIDATED_AGGREGATE_PIXELS,
     _VISION_MAX_VALIDATED_FRAME_COUNT,
+    _analysis_image_dimension_limit,
     _crop_image_region,
     _determine_mime_type,
     _image_exceeds_dimension,
@@ -893,16 +894,25 @@ async def vision_analyze_tool(
         prepared = await _prepare_image(image_url, task_id, region, validate_decode=False)
         temp_paths.append(prepared.path)
         logger.info("Image ready (%.1f KB)", prepared.size_bytes / 1024)
-        # Send at full resolution first; on a size rejection, downscale and retry.
+        # Compressed bytes alone do not bound decoded pixels or provider patches.
         logger.info("Converting image to base64...")
         image_data_url = await _run_encode_on_cpu_executor(
             _image_to_base64_data_url, prepared.path, mime_type=prepared.mime)
         logger.info("Image converted to base64 (%.1f KB)", len(image_data_url) / 1024)
         _scale_info: dict = {}
-        if len(image_data_url) > _MAX_BASE64_BYTES:
-            image_data_url = await _resize_prepared(prepared, _scale_info)
+        analyze_max_dimension = await _run_encode_on_cpu_executor(
+            _analysis_image_dimension_limit, prepared.path)
+        over_analyze_dims = await _run_encode_on_cpu_executor(
+            _image_exceeds_dimension, prepared.path, analyze_max_dimension)
+        if len(image_data_url) > _MAX_BASE64_BYTES or over_analyze_dims:
+            image_data_url = await _resize_prepared(
+                prepared, _scale_info, max_dimension=analyze_max_dimension)
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 raise ValueError(_too_large_message(image_data_url))
+            if over_analyze_dims and (not _scale_info or max(
+                _scale_info["new_width"], _scale_info["new_height"]) > analyze_max_dimension):
+                raise ValueError("Image dimensions remain too large after auto-resize; "
+                                 "restore Pillow with `hermes pm repair` or send a smaller image.")
         debug_call_data["image_size_bytes"] = prepared.size_bytes
         messages = _media_messages(prompt, "image_url", image_data_url)
         logger.info("Processing image with vision model...")
@@ -916,7 +926,8 @@ async def vision_analyze_tool(
             logger.info(
                 "API rejected image (%.1f MB, likely too large); auto-resizing to ~%.0f MB and retrying...",
                 len(image_data_url) / (1024 * 1024), _RESIZE_TARGET_BYTES / (1024 * 1024))
-            image_data_url = await _resize_prepared(prepared, _scale_info)
+            image_data_url = await _resize_prepared(
+                prepared, _scale_info, max_dimension=analyze_max_dimension)
             messages[0]["content"][1]["image_url"]["url"] = image_data_url
             response = await async_call_llm(**call_kwargs)
         analysis = await _call_vision_llm(
