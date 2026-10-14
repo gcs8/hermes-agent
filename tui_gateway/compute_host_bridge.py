@@ -336,6 +336,43 @@ def _send_compute_host_control(
         on_late_ack=on_late_ack)
 
 
+# Short: a correction is a few lock-guarded field writes in the child; a slow ack means the host
+# is wedged and the caller should fall back to queueing rather than stall the composer.
+_COMPUTE_HOST_CORRECTION_WAIT_SECS = 5.0
+
+
+def _forward_correction_to_compute_host(sid: str, session: dict, verb: str, text: str) -> str | None:
+    """Deliver a mid-turn steer/redirect to the agent the compute host is running.
+
+    Under ``turn_isolation`` the parent holds no agent for the whole turn, so applying the
+    correction here would only ever queue it behind the live turn (#82603). Returns the child's
+    status (``queued``/``redirected``/``rejected``), or None when the child could not take it
+    (no isolated turn in flight, host gone, timeout, or the child reports ``unavailable``); the
+    caller keeps its existing queue fallback for None.
+    """
+    if not (session.get("running") and session.get("_compute_host_turn_id")
+            and _session_uses_compute_host(session)):
+        return None
+    try:
+        ack = _send_compute_host_control(
+            sid, route_name=f"session.{verb}", payload={"text": text},
+            wait=True, timeout=_COMPUTE_HOST_CORRECTION_WAIT_SECS)
+    except Exception:
+        logger.debug("compute-host %s relay failed for %s", verb, sid, exc_info=True)
+        return None
+    status = ack.get("status") if ack.get("type") == "control.ack" else None
+    if status not in {"queued", "redirected", "rejected"}:
+        return None
+    if status != "rejected":
+        # Mirror the correction onto the parent's in-flight turn so a resuming client rebuilds the
+        # bubble, and drop queued self-copies of the live original (same bookkeeping as in-process).
+        with session["history_lock"]:
+            _record_inflight_correction(session, text)
+            _drop_queued_duplicates_of_inflight_user(session)
+            session["last_active"] = time.time()
+    return status
+
+
 def _compute_host_ack_error(rid, ack: dict, code: int, default: str):
     """``_err`` for a ``control.error``/``error`` ack, else None."""
     if ack.get("type") in {"control.error", "error"}:
