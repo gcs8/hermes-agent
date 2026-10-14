@@ -141,6 +141,10 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
         if err:
             return err
         _note_user_input(session)
+        # Under turn_isolation the live agent is in the compute-host child; deliver there first.
+        if (host_status := _forward_correction_to_compute_host(
+                str(params.get("session_id") or ""), session, verb, text)) is not None:
+            return _ok(rid, {"status": host_status, "text": text})
         agent = session.get("agent")
         # Redirect during the turn-build window (running=True, agent None): queue for the next turn instead of
         # a misleading 4010 the client swallows into a lost follow-up.
