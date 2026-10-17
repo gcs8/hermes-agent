@@ -17,8 +17,9 @@ import types
 
 import pytest
 
-from tui_gateway import server
+from tui_gateway import compute_host, server
 from tui_gateway.compute_host import ComputeHost
+from tests.waiting import wait_until
 
 
 def _frames(out: io.StringIO) -> list[dict]:
@@ -127,7 +128,9 @@ def test_turn_start_without_sid_is_a_turn_error(turn_env):
     assert err["request_id"] == "nosid" and err["message"] == "sid required"
 
 
-def test_second_turn_start_while_running_is_session_busy(turn_env):
+def test_second_turn_start_while_running_is_session_busy(turn_env, monkeypatch):
+    """A turn that never releases the session still ends in ``session busy`` once the wait is spent."""
+    monkeypatch.setattr(compute_host, "_LOCAL_TURN_WAIT_SECS", 0.2)
     out = io.StringIO()
     host = ComputeHost(stdout=out, heartbeat_secs=0)
     sid = "s1"
@@ -141,6 +144,82 @@ def test_second_turn_start_while_running_is_session_busy(turn_env):
         server._sessions.pop(sid, None)
         host.close()
     assert err["request_id"] == "t2" and err["message"] == "session busy"
+
+
+class _CountingLock:
+    """``history_lock`` stand-in that counts acquisitions, so a test can tell when the turn
+    worker has looked at the busy session more than once (i.e. is waiting, not refusing)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.acquired = 0
+
+    def __enter__(self):
+        self._lock.acquire()
+        self.acquired += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+
+def _run_turn_against_local_turn(session, frame, release):
+    """Start ``frame`` while a host-local turn holds ``running``; once the worker has re-checked
+    the session (or the old code already answered), apply ``release`` under the lock."""
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, heartbeat_secs=0)
+    lock = session["history_lock"] = _CountingLock()
+    server._sessions[frame["sid"]] = session
+    try:
+        host.handle_frame(frame)
+        wait_until(lambda: lock.acquired >= 2 or any(f["type"] == "turn.error" for f in _frames(out)),
+                   what="turn worker re-checked the busy session")
+        with lock:
+            release(session)
+        end = _wait(out, lambda f: f["type"] in ("turn.end", "turn.error"))
+    finally:
+        server._sessions.pop(frame["sid"], None)
+        host.close()
+    return end, _frames(out)
+
+
+def test_turn_start_waits_for_a_host_local_turn_instead_of_refusing(turn_env):
+    """The child's own notification poller can claim the session (``running=True``) for a
+    "background process completed" turn the parent never sees. A user prompt the parent then
+    routes here must run after that turn, not be refused as ``session busy``."""
+    session = _session(_agent(["after"]))
+    session["running"] = True  # host-local notification turn in flight
+    end, frames = _run_turn_against_local_turn(
+        session, {"type": "turn.start", "sid": "s1", "request_id": "user", "prompt": "I am here"},
+        lambda s: s.update(running=False))
+    assert end["type"] == "turn.end" and end["request_id"] == "user", end
+    assert end["interrupted"] is False
+    assert any(f["type"] == "turn.started" and f["request_id"] == "user" for f in frames)
+
+
+def test_turn_waiting_on_a_local_turn_honours_a_newer_queue_generation(turn_env):
+    """An interrupt that bumps the queue generation while the prompt waits still drops it."""
+    session = _session(_agent(["x"]))
+    session["running"] = True
+    session["_queued_prompt_generation"] = 2
+    end, frames = _run_turn_against_local_turn(
+        session, {"type": "turn.start", "sid": "s1", "request_id": "q", "prompt": "hi",
+                  "queued_prompt_generation": 2},
+        lambda s: s.update(_queued_prompt_generation=3, running=False))
+    assert end["type"] == "turn.end" and end["interrupted"] is True, end
+    assert not any(f["type"] == "turn.started" for f in frames)
+
+
+def test_turn_waiting_on_a_local_turn_is_dropped_by_a_stop(turn_env):
+    """Stop pressed while the prompt waits (the interrupt lands on the local turn and sets the
+    cancel latch) must not start the waiting prompt once the session frees."""
+    session = _session(_agent(["x"]))
+    session["running"] = True
+    end, frames = _run_turn_against_local_turn(
+        session, {"type": "turn.start", "sid": "s1", "request_id": "u", "prompt": "hi"},
+        lambda s: s.update(_turn_cancel_requested=True, running=False))
+    assert end["type"] == "turn.end" and end["interrupted"] is True, end
+    assert not any(f["type"] == "turn.started" for f in frames)
 
 
 def test_stale_queued_prompt_generation_ends_turn_as_interrupted(turn_env):

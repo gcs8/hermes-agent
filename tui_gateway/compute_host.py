@@ -52,6 +52,11 @@ class _HostTransport:
 # the whole budget would leave the flush racing that kill and persist nothing.
 _FLUSH_RESERVE_SECS = 1.0
 
+# How long a routed turn waits for a host-local turn (notification poller, heartbeat) that the
+# parent's mirror cannot see. Those turns are short; past this the prompt is refused as before.
+_LOCAL_TURN_WAIT_SECS = 120.0
+_LOCAL_TURN_POLL_SECS = 0.05
+
 # Fallback control.error text when a routed server method returns an error without a message.
 _CONTROL_FAILURES = {
     "session.save": "session save failed", "session.compress": "session compression failed"}
@@ -269,18 +274,14 @@ class ComputeHost:
             server._install_borrowed_lease(sid, session, frame)
             text = frame["text"] if "text" in frame else frame.get("prompt", "")
             inflight = frame["text"] if "text" in frame else frame.get("prompt")
-            with session["history_lock"]:
-                queued_gen = frame.get("queued_prompt_generation")
-                current_gen = int(session.get("_queued_prompt_generation", 0))
-                if queued_gen is not None and current_gen != int(queued_gen):
-                    self._reply("turn.end", sid, request_id, interrupted=True, ended_ns=now_ns())
-                    return
-                if session.get("running"):
-                    self._reply("turn.error", sid, request_id, message="session busy")
-                    return
-                session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
-                server._start_inflight_turn(session, inflight)
-                turn_started_at = time.time()
+            claim = self._claim_session_for_turn(server, session, frame, inflight)
+            if claim == "interrupted":
+                self._reply("turn.end", sid, request_id, interrupted=True, ended_ns=now_ns())
+                return
+            if claim == "busy":
+                self._reply("turn.error", sid, request_id, message="session busy")
+                return
+            turn_started_at = time.time()
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):
                 server._ensure_session_db_row(session)
@@ -324,6 +325,32 @@ class ComputeHost:
                         session["running"] = False
                         server._clear_inflight_turn(session)
             self._reply("turn.error", sid, request_id, reason="exception", message=str(exc))
+
+    def _claim_session_for_turn(self, server: Any, session: dict, frame: dict[str, Any], inflight: Any) -> str:
+        """Mark ``session`` running for a routed turn: ``"started"``, ``"interrupted"`` or ``"busy"``.
+
+        The parent only routes a turn here when ITS mirror shows the session idle, but this process
+        can be mid-turn on its own: the notification poller runs here and claims the session for
+        "background process completed" / heartbeat turns the parent never sees. Wait (bounded) for
+        that local turn instead of refusing the user's prompt as "session busy"."""
+        deadline = time.monotonic() + _LOCAL_TURN_WAIT_SECS
+        waited = False
+        queued_gen = frame.get("queued_prompt_generation")
+        while True:
+            with session["history_lock"]:
+                stale = queued_gen is not None and int(session.get("_queued_prompt_generation", 0)) != int(queued_gen)
+                # Stop pressed while waiting lands on the local turn and latches the cancel; the
+                # prompt waiting behind it must not start either.
+                if stale or (waited and session.get("_turn_cancel_requested")):
+                    return "interrupted"
+                if not session.get("running"):
+                    session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
+                    server._start_inflight_turn(session, inflight)
+                    return "started"
+                if time.monotonic() >= deadline or self._closed.is_set():
+                    return "busy"
+                waited = True
+            time.sleep(_LOCAL_TURN_POLL_SECS)
 
     def _emit_turn_activity(self, sid: str, session: dict, turn_id: str, started_at: float) -> None:
         # Observe the agent clock, never the host heartbeat. A reused agent's last
