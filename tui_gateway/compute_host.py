@@ -104,6 +104,9 @@ class ComputeHost:
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers or _default_workers(), thread_name_prefix="compute-host-turn")
         self._closed = threading.Event()
+        # Held while a turn claim goes from its closing check to ``running=True`` and while a
+        # close path sets ``_closed``, so a close can never land between check and claim.
+        self._claim_lock = threading.Lock()
         self._parent_pid = os.getppid()
         self._boot_id = uuid.uuid4().hex
         self._progress_counter = 0
@@ -132,7 +135,8 @@ class ComputeHost:
         self.emit({"type": kind, "sid": sid, "request_id": request_id, **extra})
 
     def close(self) -> None:
-        self._closed.set()
+        with self._claim_lock:
+            self._closed.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
         # Every caller hard-exits next (os._exit skips atexit): a foreground command still
         # running in its own process group would outlive the host.
@@ -149,7 +153,8 @@ class ComputeHost:
         Sessions still running at the deadline are skipped (unfinalized keeps them
         recoverable; atexit ``server._shutdown_sessions`` may re-finalize them).
         """
-        self._closed.set()
+        with self._claim_lock:
+            self._closed.set()
         budget = max(0.0, wait)
         deadline = time.monotonic() + budget - min(_FLUSH_RESERVE_SECS, budget / 2.0)
         while True:
@@ -345,12 +350,13 @@ class ComputeHost:
                     return "interrupted"
                 # Closing wins over a freshly idle session: a turn claimed during the drain
                 # window would start only to be killed when the host exits.
-                if self._closed.is_set():
-                    return "busy"
-                if not session.get("running"):
-                    session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
-                    server._start_inflight_turn(session, inflight)
-                    return "started"
+                with self._claim_lock:
+                    if self._closed.is_set():
+                        return "busy"
+                    if not session.get("running"):
+                        session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
+                        server._start_inflight_turn(session, inflight)
+                        return "started"
                 if time.monotonic() >= deadline or self._closed.is_set():
                     return "busy"
                 waited = True

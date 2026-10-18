@@ -380,3 +380,25 @@ def test_turn_waiting_on_a_local_turn_is_refused_once_the_host_closes(turn_env):
     assert end["type"] == "turn.error" and end["message"] == "session busy", end
     assert not started
     assert not any(f["type"] == "turn.started" for f in _frames(out))
+
+
+@pytest.mark.parametrize("closer", ["close", "shutdown"])
+def test_host_close_paths_take_the_turn_claim_lock(closer):
+    """``close``/``shutdown`` must set ``_closed`` under the same lock a turn claim holds
+    between its closing check and ``running=True``; otherwise a close on another thread can
+    land in that gap and the turn is still claimed after closing began."""
+    host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
+    held = threading.Lock()
+    held.acquire()
+    host._claim_lock = held
+    worker = threading.Thread(
+        target=(host.close if closer == "close" else lambda: host.shutdown(wait=0.0)), daemon=True)
+    try:
+        worker.start()
+        time.sleep(0.2)
+        assert not host._closed.is_set(), "close set _closed without waiting for the claim lock"
+    finally:
+        held.release()
+        worker.join(timeout=5)
+        host.close()
+    assert host._closed.is_set()
