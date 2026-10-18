@@ -390,12 +390,31 @@ def test_host_close_paths_take_the_turn_claim_lock(closer):
     host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
     held = threading.Lock()
     held.acquire()
-    host._claim_lock = held
+    attempted = threading.Event()
+
+    class _SignallingLock:
+        """Signals the first acquire attempt, then blocks on the lock the test holds."""
+
+        def acquire(self, *args, **kwargs):
+            attempted.set()
+            return held.acquire(*args, **kwargs)
+
+        def release(self):
+            held.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    host._claim_lock = _SignallingLock()
     worker = threading.Thread(
         target=(host.close if closer == "close" else lambda: host.shutdown(wait=0.0)), daemon=True)
     try:
         worker.start()
-        time.sleep(0.2)
+        assert attempted.wait(timeout=5), "close never tried to take the claim lock"
         assert not host._closed.is_set(), "close set _closed without waiting for the claim lock"
     finally:
         held.release()
