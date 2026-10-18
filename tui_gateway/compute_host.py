@@ -106,7 +106,9 @@ class ComputeHost:
         self._closed = threading.Event()
         # Held while a turn claim goes from its closing check to ``running=True`` and while a
         # close path sets ``_closed``, so a close can never land between check and claim.
-        self._claim_lock = threading.Lock()
+        # Reentrant: a SIGTERM handler runs on the main thread and calls the drain/close
+        # path again, possibly while that same thread already holds this lock.
+        self._claim_lock = threading.RLock()
         self._parent_pid = os.getppid()
         self._boot_id = uuid.uuid4().hex
         self._progress_counter = 0

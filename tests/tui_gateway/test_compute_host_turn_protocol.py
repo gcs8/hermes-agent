@@ -421,3 +421,23 @@ def test_host_close_paths_take_the_turn_claim_lock(closer):
         worker.join(timeout=5)
         host.close()
     assert host._closed.is_set()
+
+
+def test_close_gate_is_reentrant_for_a_signal_on_the_holding_thread():
+    """A SIGTERM handler runs on the main thread and re-enters the close path; if that
+    thread already holds the claim lock, a non-reentrant lock would deadlock it."""
+    host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
+    done = threading.Event()
+
+    def nested():
+        with host._claim_lock:
+            host.close()
+        done.set()
+
+    worker = threading.Thread(target=nested, daemon=True)
+    worker.start()
+    try:
+        assert done.wait(timeout=5), "re-entering the close path deadlocked on the claim lock"
+    finally:
+        host.close()
+    assert host._closed.is_set()
