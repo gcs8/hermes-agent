@@ -343,6 +343,10 @@ class ComputeHost:
                 # prompt waiting behind it must not start either.
                 if stale or (waited and session.get("_turn_cancel_requested")):
                     return "interrupted"
+                # Closing wins over a freshly idle session: a turn claimed during the drain
+                # window would start only to be killed when the host exits.
+                if self._closed.is_set():
+                    return "busy"
                 if not session.get("running"):
                     session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
                     server._start_inflight_turn(session, inflight)

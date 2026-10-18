@@ -346,3 +346,37 @@ def test_host_builds_the_session_agent_with_the_frame_login(monkeypatch):
     assert captured["auth_user_id"] == "basic:alice"
     assert session["auth_user_id"] == "basic:alice"
     assert server._session_auth_user_id(session) == "basic:alice"
+
+
+def test_turn_waiting_on_a_local_turn_is_refused_once_the_host_closes(turn_env):
+    """Host close that begins while the routed prompt waits must refuse it, even if the
+    local turn releases ``running`` before the worker re-checks: otherwise the drain
+    window starts (and then kills) a fresh turn."""
+    session = _session(_agent(["x"]))
+    session["running"] = True
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, heartbeat_secs=0)
+    lock = session["history_lock"] = _CountingLock()
+    server._sessions["s1"] = session
+    started = []
+    real_start = server._start_inflight_turn
+
+    def counting_start(*args, **kwargs):
+        started.append(args)
+        return real_start(*args, **kwargs)
+
+    try:
+        server._start_inflight_turn = counting_start
+        host.handle_frame({"type": "turn.start", "sid": "s1", "request_id": "late", "prompt": "hi"})
+        wait_until(lambda: lock.acquired >= 2, what="turn worker re-checked the busy session")
+        with lock:
+            host._closed.set()
+            session.update(running=False)
+        end = _wait(out, lambda f: f["type"] in ("turn.end", "turn.error"))
+    finally:
+        server._start_inflight_turn = real_start
+        server._sessions.pop("s1", None)
+        host.close()
+    assert end["type"] == "turn.error" and end["message"] == "session busy", end
+    assert not started
+    assert not any(f["type"] == "turn.started" for f in _frames(out))
