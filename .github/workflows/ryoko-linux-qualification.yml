@@ -70,7 +70,7 @@ jobs:
             echo "HERMES_HOME=$root/state"
             echo "HERMES_RUNTIME_DIR=$root/state/tools"
             echo "TMPDIR=$root/tmp"
-            echo "PYTHON_CPU_COUNT=2"
+            echo "PYTHON_CPU_COUNT=1"
           } >> "$GITHUB_ENV"
       - name: Bootstrap stdlib Python only
         id: bootstrap

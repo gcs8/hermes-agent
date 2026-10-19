@@ -39,10 +39,10 @@ venv with extras `all,discord,fal,firecrawl` and groups `dev,test`. No live or s
 Hermes runtime is activated or modified. There is no restored dependency cache.
 
 The canonical S `scripts/run_tests.sh` receives explicit `HERMES_PYTHON`, at most
-two workers and zero file retries. It clears `TMPDIR` with `env -i`, so a site hook
+one worker and zero file retries, matching the lane's single CPU. It clears `TMPDIR` with `env -i`, so a site hook
 in this fresh task-owned venv supplies private scratch and disables lazy installs
 for sanitized test and CLI/compute children. It does not edit S or add source paths.
-`PYTHON_CPU_COUNT=2` also bounds the inherited precompile step before its env reset.
+`PYTHON_CPU_COUNT=1` also bounds the inherited precompile step before its env reset.
 
 Success requires all of these actual executions, not skips:
 
@@ -97,9 +97,9 @@ activate the assigned checkout or install into the agent's environment:
 
 ```sh
 env -i HOME="$TASK/home" PATH=/usr/bin:/bin \
-  HERMES_PYTHON=/path/to/isolated/test-env/bin/python PYTHON_CPU_COUNT=2 \
-  HERMES_TEST_WORKERS=2 HERMES_TEST_FILE_RETRIES=0 \
-  bash scripts/run_tests.sh -j 2 --file-retries 0 \
+  HERMES_PYTHON=/path/to/isolated/test-env/bin/python PYTHON_CPU_COUNT=1 \
+  HERMES_TEST_WORKERS=1 HERMES_TEST_FILE_RETRIES=0 \
+  bash scripts/run_tests.sh -j 1 --file-retries 0 \
   tests/scripts/test_ryoko_linux_qualification.py
 ```
 

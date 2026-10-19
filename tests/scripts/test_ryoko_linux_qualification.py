@@ -304,6 +304,15 @@ def test_sibling_pr_workflows_do_not_match_this_frozen_scope():
             assert not selected, (path.name, filename)
 
 
+def test_single_cpu_lane_uses_one_native_worker_everywhere(tmp_path):
+    m = module()
+    env = m.isolated_environment(Path(sys.executable), tmp_path / "home", tmp_path / "tmp")
+    assert env["HERMES_TEST_WORKERS"] == "1"
+    assert env["PYTHON_CPU_COUNT"] == "1"
+    assert m.runner_args() == ["bash", "scripts/run_tests.sh", "-j", "1", "--file-retries", "0"]
+    assert m.runner_args("tests/e2e/run.sh") == ["bash", "tests/e2e/run.sh", "-j", "1", "--file-retries", "0"]
+
+
 def test_test_subprocesses_receive_only_task_owned_state(tmp_path, monkeypatch):
     m = module()
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-must-not-propagate")

@@ -18,6 +18,7 @@ SOURCE_SHA = "47909663ea283b2b77d326e456629c18dcf13f7b"
 PLUGIN_SHA = "22b832ab9f98ac48e2ff61fe779ed35d6c2e0f1c"
 CLI_FILE = "tests/e2e/core/providers/test_openai_responses.py"
 PLUGIN_E2E_FILE = "tests/e2e/core/providers/test_zz_codexlb_plugin_e2e.py"
+NATIVE_WORKERS = 1
 REGRESSION_FILES = (
     "tests/agent/test_relay_llm.py",
     "tests/tools/test_vision_history_budget.py",
@@ -121,6 +122,11 @@ def run_command(command: list[str], cwd: Path, environment: dict, log: Path) -> 
     return result.returncode, text
 
 
+def runner_args(script: str = "scripts/run_tests.sh") -> list[str]:
+    """Match the one-CPU lane without changing maintained test deadlines."""
+    return ["bash", script, "-j", str(NATIVE_WORKERS), "--file-retries", "0"]
+
+
 def isolated_environment(python: Path, home: Path, scratch: Path) -> dict:
     """No inherited provider credentials, endpoints, plugin config or activation state."""
     state = home / ".hermes"
@@ -130,8 +136,8 @@ def isolated_environment(python: Path, home: Path, scratch: Path) -> dict:
     return {"HOME": str(home), "PATH": f"{python.parent}:/usr/bin:/bin",
             "HERMES_HOME": str(state), "HERMES_RUNTIME_DIR": str(home / "runtime"),
             "HERMES_PYTHON": str(python), "TMPDIR": str(scratch),
-            "HERMES_DISABLE_LAZY_INSTALLS": "1", "HERMES_TEST_WORKERS": "2",
-            "HERMES_TEST_FILE_RETRIES": "0", "PYTHON_CPU_COUNT": "2",
+            "HERMES_DISABLE_LAZY_INSTALLS": "1", "HERMES_TEST_WORKERS": str(NATIVE_WORKERS),
+            "HERMES_TEST_FILE_RETRIES": "0", "PYTHON_CPU_COUNT": str(NATIVE_WORKERS),
             "TZ": "UTC", "LANG": "C.UTF-8", "PYTHONUTF8": "1"}
 
 
@@ -179,12 +185,12 @@ def qualify(args) -> int:
         if rc:
             raise ValueError("startup imports failed")
         report.update(json.loads(text))
-        native = ["bash", "scripts/run_tests.sh", "-j", "2", "--file-retries", "0"]
+        native = runner_args()
         commands = [
             ("regressions", native + list(REGRESSION_FILES), source, REGRESSION_FILES, 926),
             ("cli", native + [CLI_FILE, "-k", "test_parallel_function_calls_round_trip_once", "--include-integration"], source, [CLI_FILE], 1),
             ("plugin_unit", ["bash", "tests/run.sh"], plugin, None, 20),
-            ("plugin_e2e", ["bash", "tests/e2e/run.sh", "-j", "2", "--file-retries", "0"], plugin, [PLUGIN_E2E_FILE], 2),
+            ("plugin_e2e", runner_args("tests/e2e/run.sh"), plugin, [PLUGIN_E2E_FILE], 2),
         ]
         environment["HERMES_SRC"] = str(source)
         for name, command, cwd, files, total in commands:
