@@ -346,3 +346,98 @@ def test_host_builds_the_session_agent_with_the_frame_login(monkeypatch):
     assert captured["auth_user_id"] == "basic:alice"
     assert session["auth_user_id"] == "basic:alice"
     assert server._session_auth_user_id(session) == "basic:alice"
+
+
+def test_turn_waiting_on_a_local_turn_is_refused_once_the_host_closes(turn_env):
+    """Host close that begins while the routed prompt waits must refuse it, even if the
+    local turn releases ``running`` before the worker re-checks: otherwise the drain
+    window starts (and then kills) a fresh turn."""
+    session = _session(_agent(["x"]))
+    session["running"] = True
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, heartbeat_secs=0)
+    lock = session["history_lock"] = _CountingLock()
+    server._sessions["s1"] = session
+    started = []
+    real_start = server._start_inflight_turn
+
+    def counting_start(*args, **kwargs):
+        started.append(args)
+        return real_start(*args, **kwargs)
+
+    try:
+        server._start_inflight_turn = counting_start
+        host.handle_frame({"type": "turn.start", "sid": "s1", "request_id": "late", "prompt": "hi"})
+        wait_until(lambda: lock.acquired >= 2, what="turn worker re-checked the busy session")
+        with lock:
+            host._closed.set()
+            session.update(running=False)
+        end = _wait(out, lambda f: f["type"] in ("turn.end", "turn.error"))
+    finally:
+        server._start_inflight_turn = real_start
+        server._sessions.pop("s1", None)
+        host.close()
+    assert end["type"] == "turn.error" and end["message"] == "session busy", end
+    assert not started
+    assert not any(f["type"] == "turn.started" for f in _frames(out))
+
+
+@pytest.mark.parametrize("closer", ["close", "shutdown"])
+def test_host_close_paths_take_the_turn_claim_lock(closer):
+    """``close``/``shutdown`` must set ``_closed`` under the same lock a turn claim holds
+    between its closing check and ``running=True``; otherwise a close on another thread can
+    land in that gap and the turn is still claimed after closing began."""
+    host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
+    held = threading.Lock()
+    held.acquire()
+    attempted = threading.Event()
+
+    class _SignallingLock:
+        """Signals the first acquire attempt, then blocks on the lock the test holds."""
+
+        def acquire(self, *args, **kwargs):
+            attempted.set()
+            return held.acquire(*args, **kwargs)
+
+        def release(self):
+            held.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    host._claim_lock = _SignallingLock()
+    worker = threading.Thread(
+        target=(host.close if closer == "close" else lambda: host.shutdown(wait=0.0)), daemon=True)
+    try:
+        worker.start()
+        assert attempted.wait(timeout=5), "close never tried to take the claim lock"
+        assert not host._closed.is_set(), "close set _closed without waiting for the claim lock"
+    finally:
+        held.release()
+        worker.join(timeout=5)
+        host.close()
+    assert host._closed.is_set()
+
+
+def test_close_gate_is_reentrant_for_a_signal_on_the_holding_thread():
+    """A SIGTERM handler runs on the main thread and re-enters the close path; if that
+    thread already holds the claim lock, a non-reentrant lock would deadlock it."""
+    host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
+    done = threading.Event()
+
+    def nested():
+        with host._claim_lock:
+            host.close()
+        done.set()
+
+    worker = threading.Thread(target=nested, daemon=True)
+    worker.start()
+    try:
+        assert done.wait(timeout=5), "re-entering the close path deadlocked on the claim lock"
+    finally:
+        host.close()
+    assert host._closed.is_set()
