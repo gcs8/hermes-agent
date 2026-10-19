@@ -56,6 +56,7 @@ jobs:
   # fails open and every lane is true, so a product change that breaks the
   # flake turns main red after the merge.
   detect:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Detect affected areas
     runs-on: ubuntu-latest
     timeout-minutes: 10

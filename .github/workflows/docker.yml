@@ -70,6 +70,7 @@ jobs:
   # Resolve the release phase. Release modes run only via workflow_call from
   # the parent stable-release workflow, which passes the candidate commit.
   mode:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Resolve release phase
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -758,7 +759,7 @@ jobs:
   # publisher turns this red instead of letting the phase go green.
   release-phase-gate:
     name: Docker phase requirements met
-    if: always() && inputs.release-phase != ''
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always() && inputs.release-phase != '') }}
     needs: [mode, build, release-publish, release-publish-manifest]
     runs-on: ubuntu-latest
     timeout-minutes: 5
