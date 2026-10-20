@@ -1,0 +1,182 @@
+name: Ryoko Linux qualification
+
+# This PR-only gate does not install on main, dispatch releases, or claim upstream CI.
+on:
+  pull_request:
+    branches: [ryoko/stable-0.22.2]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-linux-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Pinned Linux source and plugin
+    if: >-
+      ${{ github.repository == 'gcs8/hermes-agent' &&
+          github.repository_id == '1260443943' &&
+          github.actor == 'gcs8' && github.triggering_actor == 'gcs8' &&
+          vars.HERMES_LINUX_SOURCE_SHA == '47909663ea283b2b77d326e456629c18dcf13f7b' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.user.login == 'gcs8' &&
+          github.event.pull_request.head.repo.full_name == 'gcs8/hermes-agent' &&
+          github.event.pull_request.base.repo.full_name == 'gcs8/hermes-agent' &&
+          github.event.pull_request.base.ref == 'ryoko/stable-0.22.2' &&
+          github.event.pull_request.head.ref == 'ci/linux-qualification-20261019' &&
+          github.event.pull_request.head.sha == vars.HERMES_LINUX_WORKFLOW_SHA }}
+    runs-on: hermes-linux-qualification
+    timeout-minutes: 30
+    outputs:
+      report: ${{ steps.native.outputs.report }}
+    steps:
+      - name: Check out reviewed workflow controls W
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          repository: gcs8/hermes-agent
+          ref: ${{ vars.HERMES_LINUX_WORKFLOW_SHA }}
+          path: control
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out approved product source S
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          repository: gcs8/hermes-agent
+          ref: ${{ vars.HERMES_LINUX_SOURCE_SHA }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out exact installed plugin P
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          repository: gcs8/hermes-codex-lb
+          ref: 22b832ab9f98ac48e2ff61fe779ed35d6c2e0f1c
+          path: plugin
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Allocate private job state
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "$RUNNER_TEMP/hermes-linux.XXXXXXXX")"
+          chmod 700 "$root"
+          mkdir -p "$root/home" "$root/tmp" "$root/evidence" "$root/state"
+          {
+            echo "QUALIFICATION_ROOT=$root"
+            echo "HOME=$root/home"
+            echo "HERMES_HOME=$root/state"
+            echo "HERMES_RUNTIME_DIR=$root/state/tools"
+            echo "TMPDIR=$root/tmp"
+            echo "PYTHON_CPU_COUNT=1"
+          } >> "$GITHUB_ENV"
+      - name: Bootstrap stdlib Python only
+        id: bootstrap
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/hermes-bootstrap-toolcache
+        with:
+          python-version: '3.12.8'
+      - name: Prepare PM-pinned Python and uv
+        shell: bash
+        working-directory: candidate
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py prepare --toolchain python --home "$QUALIFICATION_ROOT/state"
+      - name: Install PM-pinned Python and uv
+        id: toolchain
+        shell: bash
+        working-directory: candidate
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py install --toolchain python --home "$QUALIFICATION_ROOT/state"
+      - name: Build fresh locked test environment through PM
+        shell: bash
+        working-directory: candidate
+        env:
+          PM_PYTHON: ${{ steps.toolchain.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$PM_PYTHON" -m pm.build_env --source . --out "$QUALIFICATION_ROOT/test-env" \
+            --extra all --extra discord --extra fal --extra firecrawl --group dev --group test
+          "$PM_PYTHON" ../control/scripts/ci/ryoko_linux_qualification.py prepare-interpreter \
+            --python "$QUALIFICATION_ROOT/test-env/bin/python" --scratch "$QUALIFICATION_ROOT/tmp"
+      - name: Execute native scopes and validate completed evidence
+        id: native
+        shell: bash
+        env:
+          APPROVED_WORKFLOW_SHA: ${{ vars.HERMES_LINUX_WORKFLOW_SHA }}
+        run: |
+          set -euo pipefail
+          "$QUALIFICATION_ROOT/test-env/bin/python" control/scripts/ci/ryoko_linux_qualification.py run \
+            --source "$GITHUB_WORKSPACE/candidate" --plugin "$GITHUB_WORKSPACE/plugin" \
+            --python "$QUALIFICATION_ROOT/test-env/bin/python" --home "$QUALIFICATION_ROOT/home" \
+            --scratch "$QUALIFICATION_ROOT/tmp" --evidence "$QUALIFICATION_ROOT/evidence" \
+            --workflow-sha "$APPROVED_WORKFLOW_SHA"
+      - name: Retain scoped evidence, never credentials or runtime state
+        if: always() && env.QUALIFICATION_ROOT != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ryoko-linux-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_ROOT }}/evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+  # GitHub has job-level, not step-level permissions. No product/plugin code runs
+  # in this writer job. Only the last API step exports the token as an env var;
+  # checkout also receives the job token, with persist-credentials disabled.
+  status:
+    name: Publish separate status on S
+    needs: qualify
+    if: >-
+      ${{ always() && github.repository == 'gcs8/hermes-agent' &&
+          github.repository_id == '1260443943' &&
+          github.actor == 'gcs8' && github.triggering_actor == 'gcs8' &&
+          vars.HERMES_LINUX_SOURCE_SHA == '47909663ea283b2b77d326e456629c18dcf13f7b' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.user.login == 'gcs8' &&
+          github.event.pull_request.head.repo.full_name == 'gcs8/hermes-agent' &&
+          github.event.pull_request.base.repo.full_name == 'gcs8/hermes-agent' &&
+          github.event.pull_request.base.ref == 'ryoko/stable-0.22.2' &&
+          github.event.pull_request.head.ref == 'ci/linux-qualification-20261019' &&
+          github.event.pull_request.head.sha == vars.HERMES_LINUX_WORKFLOW_SHA }}
+    runs-on: hermes-linux-qualification
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Check out only reviewed status code W
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          repository: gcs8/hermes-agent
+          ref: ${{ vars.HERMES_LINUX_WORKFLOW_SHA }}
+          path: control
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bootstrap stdlib status writer
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        id: bootstrap
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/hermes-status-toolcache
+        with:
+          python-version: '3.12.8'
+      - name: Post fail-closed Linux-only status to exact S
+        if: always()
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QUALIFICATION_RESULT: ${{ needs.qualify.result }}
+          QUALIFICATION_REPORT: ${{ needs.qualify.outputs.report }}
+          APPROVED_WORKFLOW_SHA: ${{ vars.HERMES_LINUX_WORKFLOW_SHA }}
+          QUALIFICATION_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "${STATUS_PYTHON:-python3}" control/scripts/ci/ryoko_linux_qualification.py status
