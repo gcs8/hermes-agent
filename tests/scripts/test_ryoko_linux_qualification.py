@@ -323,6 +323,7 @@ def test_test_subprocesses_receive_only_task_owned_state(tmp_path, monkeypatch):
     assert rc == 0 and text == "absent\n"
 
 
+@pytest.mark.platforms("linux")  # venv layout is POSIX (bin/python), and the lane is Linux-only
 def test_private_site_hook_survives_env_i_without_mutating_source(tmp_path):
     m = module()
     venv = tmp_path / "test-env"
