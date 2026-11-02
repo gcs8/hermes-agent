@@ -12,6 +12,8 @@ name: Nix flake check
 
 on:
   pull_request:
+    # Maintained fork stable branches use their explicitly scoped qualification.
+    branches-ignore: ["ryoko/stable-*"]
   push:
     branches: [main]
   workflow_call:
