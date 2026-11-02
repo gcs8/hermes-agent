@@ -128,7 +128,7 @@ jobs:
                   and report['tests'] > 0)
           body = dict(state='success' if good else 'failure',
                       context='Ryoko Desktop persistence qualification',
-                      description='Affected Desktop tests, typecheck, lint and source checks' if good else 'Scoped qualification failed or evidence incomplete',
+                      description='Affected Desktop tests, lint and source checks; typecheck is local' if good else 'Scoped qualification failed or evidence incomplete',
                       target_url=os.environ['RUN_URL'])
           request = urllib.request.Request(
               f"https://api.github.com/repos/gcs8/hermes-agent/statuses/{os.environ['SOURCE_SHA']}",
