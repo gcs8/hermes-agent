@@ -3,13 +3,17 @@ import { atom } from 'nanostores'
 import { persistString, storedString } from '@/lib/storage'
 
 import { notifyError } from './notifications'
+import { captureReasoningEffortIntent } from './reasoning-effort-intent'
 import {
   $activeSessionId,
   $currentFastMode,
   $currentReasoningEffort,
   $currentServiceTier,
+  getComposerReasoningEffort,
+  rememberComposerReasoningEffort,
   setCurrentFastMode,
   setCurrentReasoningEffort,
+  setCurrentReasoningEffortTransient,
   setCurrentServiceTier
 } from './session'
 import { $sessionStates, sessionTileDelegate } from './session-states'
@@ -17,6 +21,27 @@ import { $sessionStates, sessionTileDelegate } from './session-states'
 const STORAGE_KEY = 'hermes.desktop.model-presets'
 const pendingWrites = new Map<string, Promise<unknown>>()
 const confirmedValues = new Map<string, string>()
+const confirmedEffortChoices = new Map<string, string>()
+
+function trackEffortChoice(dimension: 'effort' | 'speed', primary: boolean, key: string, value: string): void {
+  if (dimension === 'effort' && primary) {
+    confirmedEffortChoices.set(key, value)
+  }
+}
+
+function effortWriteIsCurrent(
+  dimension: 'effort' | 'speed',
+  key: string,
+  write: Promise<void> | undefined,
+  primary: boolean,
+  isCurrent: () => boolean,
+  dimensionIsCurrent?: (dimension: 'effort' | 'speed') => boolean
+): boolean {
+  return (
+    (dimensionIsCurrent?.(dimension) ?? true) &&
+    (dimension !== 'effort' || (pendingWrites.get(key) === write && (!primary || isCurrent())))
+  )
+}
 
 /** Per-model reasoning/fast preset, remembered globally across sessions and
  *  re-applied to the session whenever that model is selected. Unset dimensions
@@ -101,6 +126,7 @@ export async function applyModelPreset(
   const primary = ctx.primary ?? true
   const oldOwner = $activeSessionId.get()
   const slice = $sessionStates.get()[ctx.sessionId ?? '']
+  const previousChoice = getComposerReasoningEffort()
 
   const previous =
     primary && !slice
@@ -123,6 +149,8 @@ export async function applyModelPreset(
       setCurrentServiceTier(tier!)
     }
   }
+
+  const effortIsCurrent = captureReasoningEffortIntent()
 
   if (ctx.sessionId) {
     sessionTileDelegate()?.updateSession(ctx.sessionId, state => ({
@@ -155,6 +183,8 @@ export async function applyModelPreset(
       const preceding = pendingWrites.get(key)
 
       if (!preceding) {
+        trackEffortChoice(dimension, primary, key, previousChoice)
+
         confirmedValues.set(
           key,
           dimension === 'effort'
@@ -175,6 +205,8 @@ export async function applyModelPreset(
               value: dimension === 'speed' && value === 'priority' ? 'fast' : value
             })
             confirmedValues.set(key, value)
+
+            trackEffortChoice(dimension, primary, key, value)
           })
 
         pendingWrites.set(key, write)
@@ -190,10 +222,11 @@ export async function applyModelPreset(
 
         ctx.onFailure?.(dimension, confirmed)
 
-        if (ctx.isCurrent?.(dimension) ?? true) {
+        if (effortWriteIsCurrent(dimension, key, write, primary, effortIsCurrent, ctx.isCurrent)) {
           if (primary && $activeSessionId.get() === oldOwner) {
             if (dimension === 'effort' && $currentReasoningEffort.get() === effort) {
-              setCurrentReasoningEffort(confirmed.effort ?? '')
+              setCurrentReasoningEffortTransient(confirmed.effort ?? '')
+              rememberComposerReasoningEffort(confirmedEffortChoices.get(key) ?? previousChoice)
             } else if (dimension === 'speed' && $currentServiceTier.get() === tier) {
               setCurrentFastMode(confirmed.fast ?? false)
               setCurrentServiceTier(confirmed.serviceTier ?? '')
@@ -222,6 +255,7 @@ export async function applyModelPreset(
         if (pendingWrites.get(key) === write) {
           pendingWrites.delete(key)
           confirmedValues.delete(key)
+          confirmedEffortChoices.delete(key)
         }
       }
     })

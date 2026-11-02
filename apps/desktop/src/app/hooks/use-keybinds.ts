@@ -63,14 +63,18 @@ import {
 } from '@/store/profile'
 import { toggleProfileRailVisible } from '@/store/profile-rail-prefs'
 import { openFolderAsProject } from '@/store/projects'
+import { captureReasoningEffortIntent } from '@/store/reasoning-effort-intent'
 import { toggleReview } from '@/store/review'
 import {
   $activeSessionId,
   $currentReasoningEffort,
   $defaultReasoningEffort,
   $selectedStoredSessionId,
+  getComposerReasoningEffort,
   markComposerSelectionManual,
+  rememberComposerReasoningEffort,
   setCurrentReasoningEffort,
+  setCurrentReasoningEffortTransient,
   setModelPickerOpen
 } from '@/store/session'
 import { $focusedStoredSessionId } from '@/store/session-focus'
@@ -248,6 +252,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // session.create); no `config.set` — without a session the RPC falls
     // back to the persistent profile config and would rewrite the default.
     const rollback = $currentReasoningEffort.get()
+    const rememberedRollback = getComposerReasoningEffort()
     const fallback = $defaultReasoningEffort.get() || undefined
     const next = stepReasoningEffort(rollback, direction, fallback)
 
@@ -257,6 +262,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
 
     markComposerSelectionManual()
     setCurrentReasoningEffort(next)
+    const isCurrent = captureReasoningEffortIntent()
 
     if (!sessionId) {
       return
@@ -268,13 +274,14 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
 
     void writeSessionReasoningEffort(deps.requestGateway, sessionId, next)
       .then(value => {
-        if (reasoningRequestSeqRef.current === requestSeq) {
+        if (reasoningRequestSeqRef.current === requestSeq && isCurrent()) {
           setCurrentReasoningEffort(value)
         }
       })
       .catch(error => {
-        if (reasoningRequestSeqRef.current === requestSeq) {
-          setCurrentReasoningEffort(rollback)
+        if (reasoningRequestSeqRef.current === requestSeq && isCurrent()) {
+          setCurrentReasoningEffortTransient(rollback)
+          rememberComposerReasoningEffort(rememberedRollback)
           notifyError(error, translateNow('shell.modelOptions.updateFailed'))
         }
       })

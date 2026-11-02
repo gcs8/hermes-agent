@@ -1,4 +1,4 @@
-import { skillInvocationText } from '@hermes/shared'
+import { isReasoningEffort, skillInvocationText } from '@hermes/shared'
 import { mergeUsage, parseCommandDispatch, parseSlashCommand, randomUuid } from '@hermes/shared'
 import { type MutableRefObject, useCallback, useRef } from 'react'
 
@@ -38,11 +38,14 @@ import {
   ensureGatewayProfile,
   normalizeProfileKey
 } from '@/store/profile'
+import { captureReasoningEffortIntent } from '@/store/reasoning-effort-intent'
 import {
   $connection,
   $sessions,
   $yoloActive,
   applySessionTitle,
+  markComposerReasoningEffortIntent,
+  rememberComposerReasoningEffort,
   resolveComposerSessionKey,
   setActiveSessionId,
   setCurrentUsage,
@@ -1002,6 +1005,16 @@ export function useSlashCommand(deps: SlashCommandDeps) {
         // config.yaml and the Thinking gate ($showReasoning) waited for the
         // next config refresh; the effort level was set on a throwaway CLI.
         reasoning: async ctx => {
+          // Capture before target resolution can await a create/resume handshake.
+          // `none` is Off; `off` itself is a display-only alias on this RPC.
+          const requested = reasoningSlashParams(ctx.arg, '')?.value.trim().toLowerCase()
+          const effortPick = requested === 'none' || isReasoningEffort(requested ?? '')
+
+          if (effortPick) {
+            markComposerReasoningEffortIntent()
+          }
+
+          const isCurrent = captureReasoningEffortIntent()
           const resolved = await withSlashOutput(ctx)
 
           if (!resolved) {
@@ -1009,6 +1022,14 @@ export function useSlashCommand(deps: SlashCommandDeps) {
           }
 
           const { render: renderSlashOutput, sessionId } = resolved
+
+          // Only a genuine draft can own these null -> created-id publications.
+          // Keep the captured profile, authority, model and effort intent intact.
+          const created =
+            !initialRuntimeId && !initialStoredId && !initialRoutedId
+              ? { runtimeId: sessionId, storedId: selectedStoredSessionIdRef.current }
+              : undefined
+
           const params = reasoningSlashParams(ctx.arg, sessionId)
 
           try {
@@ -1027,11 +1048,14 @@ export function useSlashCommand(deps: SlashCommandDeps) {
             const value = result.value || params.value
 
             applyReasoningSlashResult(result.value)
+
+            if (effortPick && isCurrent(created) && activeSessionIdRef.current === sessionId) {
+              rememberComposerReasoningEffort(requested!)
+            }
+
             // Typed while a reply streams: the owner applies the level from the next turn.
             renderSlashOutput(
-              result.status === 'deferred'
-                ? translateNow('shell.modelMenu.pickDeferred', value)
-                : `reasoning: ${value}`
+              result.status === 'deferred' ? translateNow('shell.modelMenu.pickDeferred', value) : `reasoning: ${value}`
             )
           } catch (err) {
             if (isMissingRpcMethod(err)) {

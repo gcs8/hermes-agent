@@ -16,7 +16,7 @@ import {
   setCurrentModelTransient,
   setCurrentPersonality,
   setCurrentProviderTransient,
-  setCurrentReasoningEffort,
+  setCurrentReasoningEffortTransient,
   setCurrentReasoningEffortWire,
   setCurrentServiceTier,
   setSessionStartedAt,
@@ -69,7 +69,7 @@ function syncRuntimeMetadataToView(state: ClientSessionState) {
   // sticky localStorage selection with that runtime value (#102793).
   setCurrentModelTransient(state.model ?? '')
   setCurrentProviderTransient(state.provider ?? '')
-  setCurrentReasoningEffort(state.reasoningEffort ?? '')
+  setCurrentReasoningEffortTransient(state.reasoningEffort ?? '')
   setCurrentReasoningEffortWire(state.reasoningEffortWire ?? '')
   setCurrentServiceTier(state.serviceTier ?? '')
   setCurrentFastMode(state.fast ?? false)
