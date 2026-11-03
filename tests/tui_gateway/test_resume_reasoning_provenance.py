@@ -281,6 +281,8 @@ def test_session_resume_passes_stored_runtime_to_agent(resume_harness, monkeypat
     monkeypatch.setattr(server, "_set_session_context", lambda target, cwd=None: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
     monkeypatch.setattr(server, "_make_agent", fake_make_agent)
+    monkeypatch.setattr(server, "_make_agent_in_context", lambda sid, key, **kw:
+                        fake_make_agent(sid, key, session_id=key, **kw))
     monkeypatch.setattr(server, "_session_info", lambda agent, *a: {"model": agent.model, "provider": agent.provider})
 
     def fake_init_session(sid, key, agent, history, cols=80, **_kwargs):
