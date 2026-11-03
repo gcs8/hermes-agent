@@ -298,6 +298,8 @@ def _analysis_image_dimension_limit(image_path: Path) -> int:
         patches = ((width + 31) // 32) * ((height + 31) // 32)
         return 5248 if patches > 30000 else 8000
     except Exception:
+        # Pillow is optional and malformed images retain the ordinary dimension cap.
+        logger.debug("Image patch-budget inspection failed; using default dimension limit", exc_info=True)
         return 8000
 
 

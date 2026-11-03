@@ -59,6 +59,8 @@ def _is_process_transport(provider_name: str) -> bool:
 
         return bool(_is_external_process_provider(provider_name))
     except Exception:
+        # Plugin adapters are optional; failed discovery must not block the attempt.
+        logger.debug("Process transport discovery failed; using HTTP transport", exc_info=True)
         return False
 
 
