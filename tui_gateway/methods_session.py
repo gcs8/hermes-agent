@@ -672,8 +672,7 @@ class _Resume:
         return canonicalize_replay_history(raw), display, raw
 
     def info(self, cwd: str, overrides: dict) -> dict:
-        return _lazy_resume_info(cwd, model=(overrides.get("model_override") or {}).get("model") or "",
-                                 provider=overrides.get("provider_override") or "", profile=self.profile)
+        return _lazy_resume_info(cwd, profile=self.profile, runtime_overrides=overrides)
 
     def child_history(self, repair: bool) -> list:
         """The child's OWN conversation (no ancestors), row ids included."""
@@ -1028,6 +1027,7 @@ def _resume_eager(ctx: _Resume) -> dict:
             if (session := _sessions.get(sid)) is not None:
                 if stored_runtime_overrides.get("model_override") is not None:
                     session["model_override"] = stored_runtime_overrides["model_override"]
+                _set_session_reasoning_override(session, stored_runtime_overrides.get("reasoning_config_override"))
                 model_config = _parse_model_config(ctx.found.get("model_config"), quiet=True)
                 if _row_follows_profile(ctx.found):
                     session["follow_profile_config"] = True

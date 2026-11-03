@@ -113,6 +113,10 @@ def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
         kw.update({k: v for k, v in (("reasoning_config_override", current.get("create_reasoning_override")),
                                      ("service_tier_override", current.get("create_service_tier_override")))
                    if v is not None})
+    # Accepted parent intent supersedes the persisted build snapshot, including an
+    # explicit return to profile inheritance after resume.
+    if "create_reasoning_override" in current or "_reasoning_intent_revision" in current:
+        kw["reasoning_config_override"] = current.get("create_reasoning_override")
     return kw
 
 
@@ -439,15 +443,24 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
 # ── Methods: session ─────────────────────────────────────────────────
 
 
-def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "", profile: str | None = None) -> dict:
+def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "", profile: str | None = None,
+                      runtime_overrides: dict | None = None) -> dict:
     """session.info for a not-yet-built session (session.create's shape); tools/skills land with the deferred build."""
+    if runtime_overrides is not None:
+        model = (runtime_overrides.get("model_override") or {}).get("model") or ""
+        provider = runtime_overrides.get("provider_override") or ""
     if not model:
         model, default_provider = _session_default_route({"profile_home": _profile_home(profile)})
         provider = provider or default_provider
+    reasoning = (runtime_overrides or {}).get("reasoning_config_override")
+    if reasoning is None:
+        with _profile_build_scope(_profile_home(profile)):
+            reasoning = _load_reasoning_config(model)
+    effort = "none" if reasoning and reasoning.get("enabled") is False else str((reasoning or {}).get("effort") or "")
     return {
         "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd),
         **_lazy_info_route({"profile_home": _profile_home(profile)}, {"model": model, "provider": provider} if model else {}),
-        "tools": {}, "skills": {}, "lazy": True,
+        "tools": {}, "skills": {}, "lazy": True, "reasoning_effort": effort,
         "desktop_contract": DESKTOP_BACKEND_CONTRACT, "profile_name": _response_profile_name(profile),
     }
 
@@ -460,7 +473,7 @@ def _deferred_session_record(
     explicit_cwd: bool = False) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold resume) — _init_session's shape minus the agent."""
     now = time.time()
-    return {
+    record = {
         "agent": None, "agent_error": None, "agent_ready": threading.Event(), "attached_images": [],
         "close_on_disconnect": close_on_disconnect, "active_session_lease": lease, "cols": cols,
         "created_at": now, "cwd": cwd, "display_history_prefix": display_history_prefix or [],
@@ -476,6 +489,9 @@ def _deferred_session_record(
         "transport": current_transport() or _stdio_transport,
         "auth_user_id": _transport_auth_user_id(current_transport()),
     }
+    if isinstance(resume_runtime_overrides, dict) and "reasoning_config_override" in resume_runtime_overrides:
+        _set_session_reasoning_override(record, resume_runtime_overrides["reasoning_config_override"])
+    return record
 
 
 _ANY_PROFILE = object()  # default: match a live session regardless of profile
