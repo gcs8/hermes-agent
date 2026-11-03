@@ -47,6 +47,15 @@ def _get_compute_host_supervisor(cfg: dict | None = None):
         return _compute_host_supervisor
 
 
+def _compute_host_reasoning_frame(session: dict) -> dict:
+    """Snapshot pin plus parent-intent provenance under the same lock as accepted picks."""
+    with _history_lock(session):
+        revision = session.setdefault("_reasoning_intent_revision", uuid.uuid4().hex)
+        reasoning = session.get("create_reasoning_override")
+        return {"reasoning_parent_revision": revision,
+                "reasoning_config_override": dict(reasoning) if reasoning is not None else None}
+
+
 def _compute_host_turn_frame(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
@@ -74,7 +83,7 @@ def _compute_host_turn_frame(
         # cleared only after a successful isolated turn (_on_compute_host_turn_done),
         # so the fail-open in-process path can still apply it if the host dispatch fails.
         "pending_model_switch": session.get("pending_model_switch"),
-        "reasoning_config_override": session.get("create_reasoning_override"),
+        **_compute_host_reasoning_frame(session),
         "service_tier_override": session.get("create_service_tier_override"),
         "source": _session_source(session), "attached_images": attached_images,
         "auth_user_id": _session_auth_user_id(session),
@@ -253,6 +262,17 @@ def _apply_compute_host_metadata_mirror(session: dict, frame: dict | None) -> No
     if not isinstance(frame, dict):
         return
     with _history_lock(session):
+        revision = frame.get("reasoning_parent_revision")
+        if (revision is not None and revision == session.get("_reasoning_intent_revision")
+                and "reasoning_config_override" in frame
+                and frame.get("type") in {"turn.end", "control.ack"}):
+            # Only an acknowledged child under this parent intent may change the rebuild pin.
+            # A picker click mints a revision even for A->B->A, fencing delayed old replies.
+            reasoning = frame["reasoning_config_override"]
+            if reasoning is None:
+                session.pop("create_reasoning_override", None)
+            else:
+                session["create_reasoning_override"] = dict(reasoning)
         _compute_host_adopt_frame_meta(session, frame)
         if frame.get("message_count") is not None:
             with contextlib.suppress(Exception):
@@ -333,6 +353,8 @@ def _send_compute_host_control(
     frame = dict(payload or {})
     frame.setdefault("type", "control")
     frame.setdefault("command", command)
+    if route_name == "slash.model" and (session := _sessions.get(sid)) is not None:
+        frame.update(_compute_host_reasoning_frame(session))
     return _get_compute_host_supervisor().control(
         sid, route_name=route_name, payload=frame, wait=wait, timeout=timeout,
         on_late_ack=on_late_ack)
