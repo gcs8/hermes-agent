@@ -1,0 +1,174 @@
+name: Ryoko backend effort qualification
+
+on:
+  pull_request:
+    branches: [ryoko/stable-0.22.6]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-linux-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: >-
+      ${{ github.repository == 'gcs8/hermes-agent' && github.repository_id == '1260443943' &&
+          github.actor == 'gcs8' && github.triggering_actor == 'gcs8' &&
+          github.event.pull_request.user.login == 'gcs8' &&
+          github.event.pull_request.head.repo.id == 1260443943 &&
+          github.event.pull_request.base.repo.id == 1260443943 &&
+          github.event.pull_request.head.ref == 'ci/send-effort-20261103' &&
+          github.event.pull_request.head.sha == vars.HERMES_SEND_WORKFLOW_SHA &&
+          '99e93a166d152a83a3f323e7541990213dd92b45' == vars.HERMES_SEND_SOURCE_SHA }}
+    runs-on: hermes-linux-qualification
+    timeout-minutes: 30
+    outputs:
+      report: ${{ steps.native.outputs.report }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: controls
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Allocate isolated state
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$(mktemp -d "$RUNNER_TEMP/hermes-send.XXXXXXXX")"
+          mkdir -p "$root/home" "$root/tmp" "$root/state" "$root/evidence" "$root/cache"
+          {
+            echo "QUALIFICATION_ROOT=$root"
+            echo "QUALIFICATION_EVIDENCE=$root/evidence"
+            echo "HOME=$root/home"
+            echo "TMPDIR=$root/tmp"
+            echo "HERMES_HOME=$root/state"
+            echo "HERMES_RUNTIME_DIR=$root/state/tools"
+            echo "HERMES_DISABLE_LAZY_INSTALLS=1"
+          } >> "$GITHUB_ENV"
+      - name: Bootstrap stdlib Python
+        id: bootstrap
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/hermes-send-bootstrap
+        with:
+          python-version: '3.12.8'
+      - name: Test qualification controls without source dependencies
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: '"$BOOTSTRAP_PYTHON" -I controls/scripts/ci/test_ryoko_send_effort.py'
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: 99e93a166d152a83a3f323e7541990213dd92b45
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source provenance before executing source commands
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          "$BOOTSTRAP_PYTHON" -I - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('control', 'controls/scripts/ci/ryoko_send_effort.py')
+          control = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(control)
+          control.provenance(Path('source'))
+          PY
+      - name: Prepare pinned Python toolchain
+        working-directory: source
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py prepare --toolchain python --home "$QUALIFICATION_ROOT/state"
+          env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" GITHUB_PATH="$GITHUB_PATH" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py install --toolchain python --home "$QUALIFICATION_ROOT/state"
+      - name: Build isolated project test environment through PM
+        working-directory: source
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 "$HERMES_PYTHON" -m pm.build_env --source . --out "$QUALIFICATION_ROOT/venv" --group dev --group test --cache "$QUALIFICATION_ROOT/cache" --explicit
+      - name: Execute bounded native qualification
+        id: native
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+          WORKFLOW_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          unset PYTHONPATH PYTHONHOME VIRTUAL_ENV __HERMES_ACTIVATED __HERMES_TEST_PYTHON __HERMES_TESTS_REEXEC
+          export HERMES_PYTHON="$QUALIFICATION_ROOT/venv/bin/python"
+          export PATH="$QUALIFICATION_ROOT/venv/bin:$PATH"
+          "$BOOTSTRAP_PYTHON" -I controls/scripts/ci/ryoko_send_effort.py --source "$GITHUB_WORKSPACE/source" --evidence "$QUALIFICATION_EVIDENCE" --python "$HERMES_PYTHON"
+      - name: Retain job-owned evidence only
+        if: always() && env.QUALIFICATION_ROOT != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ryoko-send-effort-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_EVIDENCE }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  status:
+    needs: qualify
+    if: >-
+      ${{ always() && github.repository == 'gcs8/hermes-agent' && github.repository_id == '1260443943' &&
+          github.actor == 'gcs8' && github.triggering_actor == 'gcs8' &&
+          github.event.pull_request.user.login == 'gcs8' &&
+          github.event.pull_request.head.repo.id == 1260443943 &&
+          github.event.pull_request.base.repo.id == 1260443943 &&
+          github.event.pull_request.head.ref == 'ci/send-effort-20261103' &&
+          github.event.pull_request.head.sha == vars.HERMES_SEND_WORKFLOW_SHA &&
+          '99e93a166d152a83a3f323e7541990213dd92b45' == vars.HERMES_SEND_SOURCE_SHA }}
+    runs-on: hermes-linux-qualification
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        id: bootstrap
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/hermes-send-status
+        with:
+          python-version: '3.12.8'
+      - name: Publish fail-closed exact-source status without source checkout
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPORT: ${{ needs.qualify.outputs.report }}
+          RESULT: ${{ needs.qualify.result }}
+          WORKFLOW_SHA: ${{ github.event.pull_request.head.sha }}
+          STATUS_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          "$STATUS_PYTHON" -I - <<'PY'
+          import json, os, urllib.request
+          SOURCE = '99e93a166d152a83a3f323e7541990213dd92b45'
+          try:
+              report = json.loads(os.environ['REPORT'])
+          except ValueError:
+              report = {}
+          good = (isinstance(report, dict) and os.environ['RESULT'] == 'success'
+                  and report.get('qualified') is True and report.get('source') == SOURCE
+                  and report.get('workflow') == os.environ['WORKFLOW_SHA']
+                  and all(type(report.get(k)) is int and report[k] == n
+                          for k, n in [('files', 19), ('tests', 211), ('checks', 14)])
+                  and report.get('scope') == 'Linux synthetic only')
+          body = dict(state='success' if good else 'failure',
+                      context='Ryoko backend effort qualification',
+                      description='Linux synthetic: 19 files, 211 tests, 14 source checks' if good else 'Scoped workload failed or report incomplete',
+                      target_url=os.environ['RUN_URL'])
+          request = urllib.request.Request(
+              f'https://api.github.com/repos/gcs8/hermes-agent/statuses/{SOURCE}',
+              data=json.dumps(body).encode(), method='POST',
+              headers={'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
+                       'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              if response.status != 201:
+                  raise RuntimeError('status delivery failed')
+          if not good:
+              raise SystemExit('Scoped workload failed or report incomplete')
+          PY
