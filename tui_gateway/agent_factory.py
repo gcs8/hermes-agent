@@ -121,7 +121,7 @@ def _row_follows_profile(row: dict | None) -> bool:
 
 def _stored_session_runtime_overrides(row: dict | None) -> dict:
     """Runtime fields persisted with a stored session (model column, ``billing_provider``, JSON ``model_config``):
-    resume restores the model/provider/reasoning THAT chat used, not the global pick. Plugin-owned Bot-Mode
+    resume restores the model/provider and explicit reasoning intent for THAT chat. Plugin-owned Bot-Mode
     sessions normally rebuild from the member profile's CURRENT config (a stale provider pin left room bots
     "out of Nous credits" after a profile switch). A canonical Bot Chat may instead restore an explicit
     composer pick while the profile model it diverged from remains unchanged."""
@@ -145,7 +145,9 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
     route = SessionDB.session_gateway_runtime(row)
     provider, base_url, api_mode = (str(route.get(k) or "").strip() for k in ("provider", "base_url", "api_mode"))
     service_tier = str(model_config.get("service_tier") or "").strip()
-    reasoning_config = model_config.get("reasoning_config")
+    # Legacy reasoning_config is only an effective snapshot, not proof of a user pick.
+    # Equal-to-default choices can be explicit; old inherited choices can differ today.
+    reasoning_config = model_config.get("reasoning_config_override")
     from hermes_cli.runtime_provider import is_foreign_provider_endpoint
     if is_foreign_provider_endpoint(provider, base_url):
         # The endpoint and its wire belong to the provider this chat left; resolve the stored one's own.
@@ -214,8 +216,25 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
     return config
 
 
+def _sync_compression_reasoning_marker(agent, reasoning_override) -> None:
+    """Compression publishes this seed, including before the first runtime DB write.
+
+    Adapted from unsupportedpastels' NousResearch/hermes-agent PR #117247.
+    Keep explicit intent separate from the effective reasoning_config snapshot.
+    """
+    seed = getattr(agent, "_session_init_model_config", None)
+    if not isinstance(seed, dict):
+        return
+    if isinstance(reasoning_override, dict):
+        seed["reasoning_config_override"] = dict(reasoning_override)
+    else:
+        seed.pop("reasoning_config_override", None)
+
+
 def _persist_live_session_runtime(session: dict | None) -> None:
     """Persist active session runtime so future resumes restore the same footer."""
+    reasoning_override = (session or {}).get("create_reasoning_override")
+    _sync_compression_reasoning_marker((session or {}).get("agent"), reasoning_override)
     live = _live_session_agent_db(session)
     if live is None:
         return
@@ -223,6 +242,10 @@ def _persist_live_session_runtime(session: dict | None) -> None:
     try:
         row = db.get_session(session_key) or {}
         model_config = _runtime_model_config(agent, _parse_model_config(row.get("model_config")))
+        if isinstance(reasoning_override, dict):
+            model_config["reasoning_config_override"] = dict(reasoning_override)
+        else:
+            model_config.pop("reasoning_config_override", None)
         if isinstance(composer_profile := session.get("composer_override_profile"), dict):
             model_config["composer_override_profile"] = composer_profile
         elif "composer_override_profile" in session:
@@ -683,6 +706,7 @@ def _make_agent(
         # The resolved provider's request body (a custom entry's extra_body), as the CLI/cron/gateway pass it.
         request_overrides=runtime.get("request_overrides"),
         prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
+    _sync_compression_reasoning_marker(agent, reasoning_config_override)
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
