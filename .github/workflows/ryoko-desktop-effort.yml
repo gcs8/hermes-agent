@@ -58,6 +58,25 @@ jobs:
           AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/hermes-effort-bootstrap
         with:
           python-version: '3.12.8'
+      - name: Stage Node runtime library without privilege escalation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$QUALIFICATION_ROOT/libatomic"
+          cd "$QUALIFICATION_ROOT/libatomic"
+          test "$(dpkg --print-architecture)" = amd64
+          apt-cache policy libatomic1 > "$QUALIFICATION_EVIDENCE/libatomic-policy.txt"
+          # apt verifies the archive against the configured distribution metadata.
+          apt-get download libatomic1
+          shopt -s nullglob
+          packages=(*.deb)
+          test "${#packages[@]}" -eq 1
+          sha256sum "${packages[0]}" > "$QUALIFICATION_EVIDENCE/libatomic-package.sha256"
+          dpkg-deb --info "${packages[0]}" > "$QUALIFICATION_EVIDENCE/libatomic-package.txt"
+          dpkg-deb --extract "${packages[0]}" extracted
+          library="$QUALIFICATION_ROOT/libatomic/extracted/usr/lib/x86_64-linux-gnu"
+          test -f "$library/libatomic.so.1"
+          echo "LD_LIBRARY_PATH=$library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Prepare pinned Node, Python and uv
         env:
           BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
