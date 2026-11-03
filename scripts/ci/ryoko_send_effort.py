@@ -75,7 +75,7 @@ def validate_junit(path, file, expected, seen):
 
 
 def validate_checks(text):
-    if re.findall(r"^scripts/check: (.+)$", text, re.M) != ["14 checks, ok"]:
+    if re.findall(r"^scripts/check: (.+)$", text, re.MULTILINE) != ["14 checks, ok"]:
         raise ValueError("source checks incomplete")
 
 

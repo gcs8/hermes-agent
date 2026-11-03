@@ -117,7 +117,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(output.read_text(), "")
 
     def test_admission_as_data(self):
-        guards = re.findall(r"if: >-\n(.*?)\n    runs-on:", WORKFLOW, re.S)
+        guards = re.findall(r"if: >-\n(.*?)\n    runs-on:", WORKFLOW, re.DOTALL)
         self.assertEqual(len(guards), 2)
         pr = {"user": {"login": "gcs8"}, "head": {"repo": {"id": 1260443943},
               "ref": "ci/send-effort-20261103", "sha": control.BASE}, "base": {"repo": {"id": 1260443943}}}
