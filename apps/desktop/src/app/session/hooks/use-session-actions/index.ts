@@ -73,6 +73,7 @@ import {
   idsShareLineage,
   type NewChatWorkspaceTarget,
   resolveComposerSessionKey,
+  restoreComposerReasoningEffort,
   rotateFreshDraftKey,
   sessionPinId,
   setActiveSessionId,
@@ -550,11 +551,10 @@ export function useSessionActions({
       setCurrentUsage({ calls: 0, input: 0, output: 0, total: 0 })
       setSessionStartedAt(null)
       setTurnStartedAt(null)
-      // The composer's model/effort/fast is sticky UI state (persisted in
-      // localStorage) — a new chat FOLLOWS your last pick instead of snapping
-      // back to the profile default, so we deliberately don't reset it here. The
-      // profile default still owns first-run seeding and profile switches (see
-      // refreshCurrentModel). Keep the canonical service tier too: clearing
+      restoreComposerReasoningEffort()
+      // Model/fast stay sticky; effort restores the saved pick above. Profile
+      // defaults still seed first-run and profile switches (refreshCurrentModel).
+      // Keep the canonical service tier too: clearing
       // it while retaining fast=true would silently downgrade Ultrafast.
       setYoloActive(false)
       setNewChatWorkspaceTarget(hasWorkspaceTarget ? workspaceTarget : undefined)

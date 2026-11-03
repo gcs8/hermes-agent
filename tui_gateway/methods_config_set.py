@@ -360,11 +360,11 @@ def _set_reasoning(rid, params, key, value, session):
             # service tier from config.yaml (#48055, #23131). Session pins are cleared below so a rebuild
             # can't resurrect them. (Global process state is still never touched — see the
             # cross-session-contamination note in _apply_model_switch.)
-            session.pop("create_reasoning_override", None)
+            _set_session_reasoning_override(session, None)
     else:  # session-scoped like the gateway's `/reasoning <level>`; a menu pick must not rewrite the global
-        session["create_reasoning_override"] = parsed
+        _set_session_reasoning_override(session, parsed)
     if session and session.get("agent") is not None:
-        session["agent"].reasoning_config = parsed
+        _set_agent_reasoning_config(session["agent"], parsed)
         _persist_live_session_runtime(session)
         _emit_session_info(params.get("session_id", ""), session)
     return _kv(rid, key, arg)

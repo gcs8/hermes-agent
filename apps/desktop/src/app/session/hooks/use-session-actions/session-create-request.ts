@@ -13,8 +13,8 @@ import {
   $currentFastMode,
   $currentModel,
   $currentProvider,
-  $currentReasoningEffort,
   $currentServiceTier,
+  getComposerReasoningEffort,
   getCurrentModelSource
 } from '@/store/session'
 import type { SessionCreateResponse } from '@/types/hermes'
@@ -109,7 +109,7 @@ export async function desktopSessionCreateParams(
   const isManualSelection = getCurrentModelSource() === 'manual'
 
   const selection = {
-    effort: $currentReasoningEffort.get().trim(),
+    effort: getComposerReasoningEffort().trim(),
     fast: $currentFastMode.get(),
     serviceTier: $currentServiceTier.get().trim(),
     model: isManualSelection ? $currentModel.get().trim() : '',

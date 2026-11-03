@@ -53,9 +53,41 @@ class _HostTransport:
 # the whole budget would leave the flush racing that kill and persist nothing.
 _FLUSH_RESERVE_SECS = 1.0
 
+# How long a routed turn waits for a host-local turn (notification poller, heartbeat) that the
+# parent's mirror cannot see. Those turns are short; past this the prompt is refused as before.
+_LOCAL_TURN_WAIT_SECS = 120.0
+_LOCAL_TURN_POLL_SECS = 0.05
+
 # Fallback control.error text when a routed server method returns an error without a message.
 _CONTROL_FAILURES = {
     "session.save": "session save failed", "session.compress": "session compression failed"}
+
+
+# Mid-turn correction routes -> (AIAgent method, wire status when accepted).
+_CORRECTION_ROUTES: dict[str, tuple[str, str]] = {
+    "session.steer": ("steer", "queued"), "session.redirect": ("redirect", "redirected")}
+
+
+def _apply_host_correction(server: Any, session: dict, route_name: str, text: str) -> str:
+    """Apply a parent-relayed steer/redirect to this child's live agent.
+
+    ``unavailable`` means the child cannot take it (no live agent, idle, compressing): the parent
+    then keeps its own fallback (queue). The child never queues a correction itself, because the
+    parent owns the next-turn queue.
+    """
+    verb, accepted_status = _CORRECTION_ROUTES[route_name]
+    agent = session.get("agent")
+    if (not text or agent is None or not session.get("running")
+            or server._session_compression_in_flight(session)):
+        return "unavailable"
+    if verb == "redirect" and getattr(agent, "_supports_active_turn_redirect", False) is not True:
+        return "unavailable"
+    if not hasattr(agent, verb):
+        return "unavailable"
+    response = server._apply_correction(None, session, verb, text, accepted_status)
+    if "error" in response:
+        return "unavailable"
+    return str((response.get("result") or {}).get("status") or "rejected")
 
 
 class ComputeHost:
@@ -73,6 +105,11 @@ class ComputeHost:
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers or _default_workers(), thread_name_prefix="compute-host-turn")
         self._closed = threading.Event()
+        # Held while a turn claim goes from its closing check to ``running=True`` and while a
+        # close path sets ``_closed``, so a close can never land between check and claim.
+        # Reentrant: a SIGTERM handler runs on the main thread and calls the drain/close
+        # path again, possibly while that same thread already holds this lock.
+        self._claim_lock = threading.RLock()
         self._parent_pid = os.getppid()
         self._boot_id = uuid.uuid4().hex
         self._progress_counter = 0
@@ -101,7 +138,8 @@ class ComputeHost:
         self.emit({"type": kind, "sid": sid, "request_id": request_id, **extra})
 
     def close(self) -> None:
-        self._closed.set()
+        with self._claim_lock:
+            self._closed.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
         # Every caller hard-exits next (os._exit skips atexit): a foreground command still
         # running in its own process group would outlive the host.
@@ -121,7 +159,8 @@ class ComputeHost:
         Sessions still running at the deadline are skipped (unfinalized keeps them
         recoverable; atexit ``server._shutdown_sessions`` may re-finalize them).
         """
-        self._closed.set()
+        with self._claim_lock:
+            self._closed.set()
         budget = max(0.0, wait)
         deadline = time.monotonic() + budget - min(_FLUSH_RESERVE_SECS, budget / 2.0)
         while True:
@@ -246,18 +285,15 @@ class ComputeHost:
             server._install_borrowed_lease(sid, session, frame)
             text = frame["text"] if "text" in frame else frame.get("prompt", "")
             inflight = frame["text"] if "text" in frame else frame.get("prompt")
-            with session["history_lock"]:
-                queued_gen = frame.get("queued_prompt_generation")
-                current_gen = int(session.get("_queued_prompt_generation", 0))
-                if queued_gen is not None and current_gen != int(queued_gen):
-                    self._reply("turn.end", sid, request_id, interrupted=True, ended_ns=now_ns())
-                    return
-                if session.get("running"):
-                    self._reply("turn.error", sid, request_id, message="session busy")
-                    return
-                session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
-                server._start_inflight_turn(session, inflight)
-                turn_started_at = time.time()
+            claim = self._claim_session_for_turn(server, session, frame, inflight)
+            if claim == "interrupted":
+                self._reply("turn.end", sid, request_id, interrupted=True, ended_ns=now_ns())
+                return
+            if claim == "busy":
+                self._reply("turn.error", sid, request_id, message="session busy")
+                return
+            self._sync_turn_reasoning(server, session, frame)
+            turn_started_at = time.time()
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):
                 server._ensure_session_db_row(session)
@@ -291,7 +327,8 @@ class ComputeHost:
                 self._progress_counter += 1
             self._reply(
                 "turn.end", sid, request_id, **meta, interrupted=interrupted, ended_ns=now_ns(),
-                session_info=session_info, session_info_emitted=True)
+                session_info=session_info, session_info_emitted=True,
+                **self._reasoning_reply(session, frame))
         except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- the turn's one reply (the outage is a SystemExit)
             with contextlib.suppress(Exception):
                 from tui_gateway import server
@@ -301,6 +338,37 @@ class ComputeHost:
                         session["running"] = False
                         server._clear_inflight_turn(session)
             self._reply("turn.error", sid, request_id, reason="exception", message=str(exc))
+
+    def _claim_session_for_turn(self, server: Any, session: dict, frame: dict[str, Any], inflight: Any) -> str:
+        """Mark ``session`` running for a routed turn: ``"started"``, ``"interrupted"`` or ``"busy"``.
+
+        The parent only routes a turn here when ITS mirror shows the session idle, but this process
+        can be mid-turn on its own: the notification poller runs here and claims the session for
+        "background process completed" / heartbeat turns the parent never sees. Wait (bounded) for
+        that local turn instead of refusing the user's prompt as "session busy"."""
+        deadline = time.monotonic() + _LOCAL_TURN_WAIT_SECS
+        waited = False
+        queued_gen = frame.get("queued_prompt_generation")
+        while True:
+            with session["history_lock"]:
+                stale = queued_gen is not None and int(session.get("_queued_prompt_generation", 0)) != int(queued_gen)
+                # Stop pressed while waiting lands on the local turn and latches the cancel; the
+                # prompt waiting behind it must not start either.
+                if stale or (waited and session.get("_turn_cancel_requested")):
+                    return "interrupted"
+                # Closing wins over a freshly idle session: a turn claimed during the drain
+                # window would start only to be killed when the host exits.
+                with self._claim_lock:
+                    if self._closed.is_set():
+                        return "busy"
+                    if not session.get("running"):
+                        session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
+                        server._start_inflight_turn(session, inflight)
+                        return "started"
+                if time.monotonic() >= deadline or self._closed.is_set():
+                    return "busy"
+                waited = True
+            time.sleep(_LOCAL_TURN_POLL_SECS)
 
     def _emit_turn_activity(self, sid: str, session: dict, turn_id: str, started_at: float) -> None:
         # Observe the agent clock, never the host heartbeat. A reused agent's last
@@ -318,6 +386,39 @@ class ComputeHost:
         # samples age without requiring synchronized wall clocks in the parent.
         self._transport.write({"jsonrpc": "2.0", "method": "compute_host.activity", "params": {
             "session_id": sid, "turn_id": turn_id, "activity_ns": activity_ns}})
+
+    def _sync_turn_reasoning(self, server: Any, session: dict, frame: dict[str, Any]) -> None:
+        """Apply a NEW parent intent after the idle claim, not its unchanged stale pin.
+
+        Child /model may change reasoning between sends. A parent's opaque revision distinguishes
+        a new picker action (including A->B->A) from an echo of pre-command intent. Old frames
+        without a revision retain the legacy field semantics; a missing field is still a no-op.
+        """
+        if "reasoning_config_override" not in frame:
+            return
+        revision = frame.get("reasoning_parent_revision")
+        if revision is not None and revision == session.get("_reasoning_parent_revision"):
+            return
+        reasoning = frame["reasoning_config_override"]
+        if reasoning is not None:
+            session["create_reasoning_override"] = dict(reasoning)
+        elif session.pop("create_reasoning_override", None) is not None or revision is not None:
+            with server._session_profile_runtime_scope(session, hydrate_secrets=False):
+                reasoning = server._load_reasoning_config(session["agent"].model)
+        else:
+            return
+        server._set_agent_reasoning_config(session["agent"], reasoning)
+        if revision is not None:
+            session["_reasoning_parent_revision"] = revision
+
+    def _reasoning_reply(self, session: dict, frame: dict[str, Any]) -> dict:
+        """Echo consumed parent provenance with the actual child pin, never inferred live effort."""
+        revision = frame.get("reasoning_parent_revision")
+        if revision is None or revision != session.get("_reasoning_parent_revision"):
+            return {}
+        reasoning = session.get("create_reasoning_override")
+        return {"reasoning_parent_revision": revision,
+                "reasoning_config_override": dict(reasoning) if reasoning is not None else None}
 
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
@@ -451,6 +552,9 @@ class ComputeHost:
                 self._reply("control.error", sid, request_id, message=error)
             elif route_name == "reload.mcp":
                 self._handle_reload_mcp({**frame, "type": "reload_mcp"})
+            elif route_name in _CORRECTION_ROUTES:
+                status = _apply_host_correction(server, session, route_name, str(frame.get("text") or ""))
+                self._reply("control.ack", sid, request_id, route_name=route_name, status=status)
             else:
                 ack = self._control_ack(server, frame, session)
                 if "error" in ack:
@@ -478,6 +582,8 @@ class ComputeHost:
         sid = str(frame.get("sid") or "")
         route_name = str(frame.get("route_name") or "")
         command = str(frame.get("command") or "")
+        if route_name == "slash.model":
+            self._sync_turn_reasoning(server, session, frame)
         if route_name in {"session.save", "session.compress"}:
             params = {"session_id": sid}
             if route_name == "session.compress":
@@ -504,6 +610,8 @@ class ComputeHost:
                 messages = server._history_to_messages(list(session.get("history") or []), profile_home=session.get("profile_home"))
                 ack = {"output": output, **_history_meta(session), "messages": messages}
         ack["session_info"] = server._session_info(session.get("agent"), session)
+        if route_name == "slash.model":
+            ack.update(self._reasoning_reply(session, frame))
         return ack
 
     def _live_turns(self) -> list[concurrent.futures.Future]:

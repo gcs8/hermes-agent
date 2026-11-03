@@ -284,6 +284,23 @@ def _validate_raster_image_decodable(
     return None
 
 
+def _analysis_image_dimension_limit(image_path: Path) -> int:
+    """Common one-shot limits: 8000px per side, 30k 32px patches.
+
+    Only over-budget rasters get the stricter 5248px ceiling: its largest
+    possible patch grid is 164 squared (26,896), leaving provider headroom.
+    Small screenshots stay byte-identical; the original is never rewritten.
+    """
+    try:
+        from PIL import Image
+        with Image.open(image_path) as image:
+            width, height = image.size
+        patches = ((width + 31) // 32) * ((height + 31) // 32)
+        return 5248 if patches > 30000 else 8000
+    except Exception:
+        return 8000
+
+
 def _image_exceeds_dimension(image_path: Path, max_dimension: int) -> bool:
     """True if the longest side exceeds ``max_dimension`` px (Anthropic's 8000px per-side cap is
     independent of bytes). False without Pillow or on unreadable files — a missing soft

@@ -53,6 +53,7 @@ const COMPOSER_SERVICE_TIER_KEY = 'hermes.desktop.composer.service-tier'
 // composer. null means the exact owner is temporarily unknown: values may still
 // paint, but must not be written through the previous backend's storage key.
 let composerSelectionScope: string | null = ''
+let composerReasoningEffortGeneration = 0
 
 function composerScopeForConnection(connection: HermesConnection | null): string | null {
   if (!connection) {
@@ -1411,7 +1412,8 @@ export function getSessionOwnerHint(
 export const $resumeExhaustedSessionId = atom<string | null>(null)
 export const $currentModel = atom(storedComposerString(COMPOSER_MODEL_KEY) ?? '')
 export const $currentProvider = atom(storedComposerString(COMPOSER_PROVIDER_KEY) ?? '')
-export const $currentReasoningEffort = atom(storedString(COMPOSER_EFFORT_KEY) ?? '')
+let composerReasoningEffort = storedString(COMPOSER_EFFORT_KEY) ?? ''
+export const $currentReasoningEffort = atom(composerReasoningEffort)
 export const $currentServiceTier = atom(storedString(COMPOSER_SERVICE_TIER_KEY) ?? '')
 export const $currentFastMode = atom(storedBoolean(COMPOSER_FAST_KEY, false))
 // Effective approval-bypass state mirrored from the gateway (session.info).
@@ -1475,6 +1477,7 @@ function rescopeComposerSelection(nextScope: string | null): void {
   }
 
   composerSelectionScope = nextScope
+  composerReasoningEffortGeneration += 1
   $currentModel.set(storedComposerString(COMPOSER_MODEL_KEY) ?? '')
   $currentProvider.set(storedComposerString(COMPOSER_PROVIDER_KEY) ?? '')
   $currentModelSource.set(getCurrentModelSource())
@@ -1768,11 +1771,37 @@ export const markComposerSelectionManual = (): void => {
   setCurrentModelSource('manual')
 }
 
+export const getComposerReasoningEffortGeneration = () => composerReasoningEffortGeneration
+export const markComposerReasoningEffortIntent = () => ++composerReasoningEffortGeneration
+
+/** Remember intent separately from the viewed session, including on rollback. */
+export const rememberComposerReasoningEffort = (value: string) => {
+  markComposerReasoningEffortIntent()
+  composerReasoningEffort = value
+  persistString(COMPOSER_EFFORT_KEY, composerReasoningEffort || null)
+}
+
 export const setCurrentReasoningEffort = (next: Updater<string>) => {
   updateAtom($currentReasoningEffort, next)
-  persistString(COMPOSER_EFFORT_KEY, $currentReasoningEffort.get() || null)
+  rememberComposerReasoningEffort($currentReasoningEffort.get())
   // The wire level is only meaningful for the effort the gateway computed it
   // for; an optimistic pick clears it until the next session.info re-stamps.
+  $currentReasoningEffortWire.set('')
+}
+
+/** Update the displayed effort without persisting a user preference.
+
+    session.info for any viewed session reports that session's live effort;
+    persisting it would overwrite the user's picked effort for the next new
+    chat (#145299). User picks go through setCurrentReasoningEffort. */
+export const setCurrentReasoningEffortTransient = (next: Updater<string>) => updateAtom($currentReasoningEffort, next)
+
+/** A fresh draft follows the user's saved pick, not the last session viewed.
+ * An absent pick leaves effort unset so the owning profile supplies its default. */
+export const getComposerReasoningEffort = () => composerReasoningEffort
+
+export const restoreComposerReasoningEffort = () => {
+  setCurrentReasoningEffortTransient(getComposerReasoningEffort())
   $currentReasoningEffortWire.set('')
 }
 

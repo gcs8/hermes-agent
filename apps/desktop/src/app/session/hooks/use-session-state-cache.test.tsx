@@ -536,6 +536,20 @@ function RotationHarness({ activeSessionId, onReady, selectedStoredSessionId }: 
 }
 
 describe('useSessionStateCache — per-session timers', () => {
+  it.each(['high', ''])('a warm view sync preserves the saved effort choice %s', picked => {
+    let cache!: Cache
+    render(<Harness activeSessionId="fg-runtime" onReady={c => (cache = c)} selectedStoredSessionId="fg-stored" />)
+    setCurrentReasoningEffort(picked)
+    const saved = localStorage.getItem('hermes.desktop.composer.reasoning-effort')
+
+    act(() => {
+      cache.updateSessionState('fg-runtime', state => ({ ...state, reasoningEffort: 'low' }), 'fg-stored')
+    })
+
+    expect($currentReasoningEffort.get()).toBe('low')
+    expect(localStorage.getItem('hermes.desktop.composer.reasoning-effort')).toBe(saved)
+  })
+
   beforeEach(() => {
     // The view-sync flush runs on a real rAF in the browser path; in jsdom we
     // want it synchronous so the global mirror is observable immediately. The
