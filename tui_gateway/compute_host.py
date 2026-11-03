@@ -327,7 +327,8 @@ class ComputeHost:
                 self._progress_counter += 1
             self._reply(
                 "turn.end", sid, request_id, **meta, interrupted=interrupted, ended_ns=now_ns(),
-                session_info=session_info, session_info_emitted=True)
+                session_info=session_info, session_info_emitted=True,
+                **self._reasoning_reply(session, frame))
         except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- the turn's one reply (the outage is a SystemExit)
             with contextlib.suppress(Exception):
                 from tui_gateway import server
@@ -387,23 +388,37 @@ class ComputeHost:
             "session_id": sid, "turn_id": turn_id, "activity_ns": activity_ns}})
 
     def _sync_turn_reasoning(self, server: Any, session: dict, frame: dict[str, Any]) -> None:
-        """Adopt the parent's effort only after claiming an idle child, before turn persistence.
+        """Apply a NEW parent intent after the idle claim, not its unchanged stale pin.
 
-        A missing field is an older sender, not a reset. Explicit None releases a previous
-        session pin to this child's owning profile. Fresh and reused children keep the pin
-        so a queued model switch cannot replace it with destination defaults.
+        Child /model may change reasoning between sends. A parent's opaque revision distinguishes
+        a new picker action (including A->B->A) from an echo of pre-command intent. Old frames
+        without a revision retain the legacy field semantics; a missing field is still a no-op.
         """
         if "reasoning_config_override" not in frame:
+            return
+        revision = frame.get("reasoning_parent_revision")
+        if revision is not None and revision == session.get("_reasoning_parent_revision"):
             return
         reasoning = frame["reasoning_config_override"]
         if reasoning is not None:
             session["create_reasoning_override"] = dict(reasoning)
-        elif session.pop("create_reasoning_override", None) is not None:
+        elif session.pop("create_reasoning_override", None) is not None or revision is not None:
             with server._session_profile_runtime_scope(session, hydrate_secrets=False):
                 reasoning = server._load_reasoning_config(session["agent"].model)
         else:
             return
         server._set_agent_reasoning_config(session["agent"], reasoning)
+        if revision is not None:
+            session["_reasoning_parent_revision"] = revision
+
+    def _reasoning_reply(self, session: dict, frame: dict[str, Any]) -> dict:
+        """Echo consumed parent provenance with the actual child pin, never inferred live effort."""
+        revision = frame.get("reasoning_parent_revision")
+        if revision is None or revision != session.get("_reasoning_parent_revision"):
+            return {}
+        reasoning = session.get("create_reasoning_override")
+        return {"reasoning_parent_revision": revision,
+                "reasoning_config_override": dict(reasoning) if reasoning is not None else None}
 
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
@@ -567,6 +582,8 @@ class ComputeHost:
         sid = str(frame.get("sid") or "")
         route_name = str(frame.get("route_name") or "")
         command = str(frame.get("command") or "")
+        if route_name == "slash.model":
+            self._sync_turn_reasoning(server, session, frame)
         if route_name in {"session.save", "session.compress"}:
             params = {"session_id": sid}
             if route_name == "session.compress":
@@ -593,6 +610,8 @@ class ComputeHost:
                 messages = server._history_to_messages(list(session.get("history") or []), profile_home=session.get("profile_home"))
                 ack = {"output": output, **_history_meta(session), "messages": messages}
         ack["session_info"] = server._session_info(session.get("agent"), session)
+        if route_name == "slash.model":
+            ack.update(self._reasoning_reply(session, frame))
         return ack
 
     def _live_turns(self) -> list[concurrent.futures.Future]:

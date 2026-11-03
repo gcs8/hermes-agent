@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import uuid
 
 from .method_ctx import HandlerRegistry, bind_module
 
@@ -21,6 +22,20 @@ def _set_agent_reasoning_config(agent, reasoning_config) -> None:
     primary = getattr(agent, "_primary_runtime", None)
     if isinstance(primary, dict):
         primary["reasoning_config"] = copy.deepcopy(reasoning_config)
+
+
+def _set_session_reasoning_override(session: dict, reasoning) -> None:
+    """Record accepted reasoning intent, including repeated A->B->A picks.
+
+    Child replies may replace this pin only while this revision is still current.
+    Adoption itself does not mint parent intent.
+    """
+    with session.get("history_lock") or contextlib.nullcontext():
+        if reasoning is None:
+            session.pop("create_reasoning_override", None)
+        else:
+            session["create_reasoning_override"] = copy.deepcopy(reasoning)
+        session["_reasoning_intent_revision"] = uuid.uuid4().hex
 
 
 def _snapshot_agent_model_runtime(agent) -> dict:
@@ -305,8 +320,7 @@ def _commit_agent_switch(
         raise ValueError(f"Model switch to {result.new_model} failed ({exc}); "
                          f"staying on {getattr(agent, 'model', current_model)}.") from exc
     if reasoning_effort:
-        _apply_switch_reasoning(sid, session, agent, reasoning_effort,
-                                persist_global=persist_global, one_turn=one_turn)
+        _apply_switch_reasoning(sid, session, agent, reasoning_effort, one_turn=one_turn)
     elif (reasoning := session.get("create_reasoning_override")) is not None:
         # Session choice > destination per-model/global defaults, as at construction.
         # Keep the requested level; each provider's wire layer owns capability clamping.
@@ -398,7 +412,9 @@ def _apply_model_switch(
         from hermes_cli.model_switch import persist_model_selection
         persist_model_selection(result)
     if reasoning_effort and agent is None:
-        _apply_switch_reasoning(sid, session, agent, reasoning_effort, persist_global=persist_global, one_turn=one_turn)
+        _apply_switch_reasoning(sid, session, agent, reasoning_effort, one_turn=one_turn)
+    if reasoning_effort and persist_global:
+        _finish_global_switch_reasoning(session, reasoning_effort)
     if count_switch:
         from hermes_cli.observability.shared_metrics_events import record_model_switch
 
@@ -446,24 +462,40 @@ def _reset_session_model_override(sid: str, session: dict) -> dict:
             "confirm_required": False, "scope": "session"}
 
 
-def _apply_switch_reasoning(sid: str, session, agent, effort: str, *, persist_global: bool, one_turn: bool) -> None:
-    """``/model X --reasoning <level>``: the effort rides with the pick and shares its scope. Runs
-    AFTER ``agent.switch_model`` (which re-resolves ``reasoning_config`` from config.yaml, so an
-    earlier write would be clobbered), but BEFORE runtime persistence and session.info.
-    ``--once`` restores the pre-switch effort through ``one_turn_model_restore``."""
+def _apply_switch_reasoning(sid: str, session, agent, effort: str, *, one_turn: bool) -> None:
+    """Apply before publishing the swap; retain a session pin until any global write succeeds.
+
+    ``--once`` leaves persistent intent alone and restores through ``one_turn_model_restore``.
+    No config is written until the model client has swapped and the commit is recorded.
+    """
     from hermes_constants import parse_reasoning_effort
     parsed = parse_reasoning_effort(effort)
     if parsed is None:
         return
     if agent is not None:
         _set_agent_reasoning_config(agent, parsed)
-    if one_turn or not isinstance(session, dict):
-        return
-    if persist_global:
+    if not one_turn and isinstance(session, dict):
+        _set_session_reasoning_override(session, parsed)
+
+
+def _finish_global_switch_reasoning(session: dict, effort: str) -> None:
+    """Global effort refusal is an explicit partial success, never an unrecorded model swap.
+
+    Keep the successful model and its requested effort pinned and persisted for this session.
+    ConfigWriteError guarantees the refused key was not changed. Do not attempt a second
+    client swap as rollback: it can fail too, and the model selection has already committed.
+    """
+    from hermes_cli.config_backend import ConfigWriteError
+    try:
         _write_config_key("agent.reasoning_effort", effort)
-        session.pop("create_reasoning_override", None)  # global wins; see _set_reasoning
-    else:
-        session["create_reasoning_override"] = parsed
+    except ConfigWriteError as exc:
+        raise ConfigWriteError(
+            f"Model is active with {effort} reasoning for this session; global reasoning was not saved: {exc}",
+            code=exc.code) from exc
+    _set_session_reasoning_override(session, None)
+    if session.get("agent") is not None:
+        _persist_live_session_runtime(session)
+
 
 
 
