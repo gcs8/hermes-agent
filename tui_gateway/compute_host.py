@@ -408,6 +408,7 @@ class ComputeHost:
         else:
             return
         server._set_agent_reasoning_config(session["agent"], reasoning)
+        server._sync_compression_reasoning_marker(session["agent"], session.get("create_reasoning_override"))
         if revision is not None:
             session["_reasoning_parent_revision"] = revision
 

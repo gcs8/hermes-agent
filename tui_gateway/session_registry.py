@@ -454,7 +454,7 @@ def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "", profile:
         provider = provider or default_provider
     reasoning = (runtime_overrides or {}).get("reasoning_config_override")
     if reasoning is None:
-        with _profile_build_scope(_profile_home(profile)):
+        with _session_profile_runtime_scope({"profile_home": _profile_home(profile)}, hydrate_secrets=False):
             reasoning = _load_reasoning_config(model)
     effort = "none" if reasoning and reasoning.get("enabled") is False else str((reasoning or {}).get("effort") or "")
     return {
@@ -801,6 +801,24 @@ def _live_visible_history(session: dict, db, in_memory_fallback: list[dict]) -> 
         except Exception:
             logger.debug("live display projection read failed", exc_info=True)
     return in_memory_fallback
+
+
+def _resume_reuse_live_locked(ctx: _Resume, sid: str, session: dict) -> dict:
+    """Reuse with _session_resume_lock already held (including the eager double-check)."""
+    if (refusal := _reattach_refusal(ctx.rid, sid, session)) is not None:
+        return refusal
+    _cancel_ws_orphan_reap(sid)  # unconditionally: the fast path must never race the reap Timer
+    payload = _live_session_payload(sid, session, cols=ctx.cols, touch=True, omit_messages=ctx.omit_messages,
+                                    transport=current_transport() or _stdio_transport,
+                                    inline_images=ctx.inline_images)
+    payload["resumed"] = ctx.target
+    if ctx.defer_history:
+        payload.update(messages=[], hydrating=bool(session.get("resume_hydrating")),
+                       message_count=int(session.get("resume_message_count") or payload["message_count"]))
+    # A lazy watch session never owns a run loop — overlay the child-run registry.
+    if session.get("agent") is None and _child_run_active(ctx.target, ctx.profile_home):
+        payload.update(running=True, status="streaming")
+    return _ok(ctx.rid, payload)
 
 
 def _live_session_payload(

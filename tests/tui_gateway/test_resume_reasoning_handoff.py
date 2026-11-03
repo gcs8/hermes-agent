@@ -43,10 +43,13 @@ def resume_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_profile_session_db", lambda home: (db, False))
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr("hermes_state_registry.acquire", lambda *a, **kw: db)
+    monkeypatch.setattr("hermes_state_registry.release_or_close", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "route_supported_efforts", lambda *a, **kw: None)
     monkeypatch.setattr("hermes_cli.env_loader.hydrate_profile_secret_sources", lambda *a: None)
     monkeypatch.setattr(server, "_default_session_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(server, "_profile_default_cwd", lambda home: str(tmp_path))
     monkeypatch.setattr(server, "_load_dashboard_process_isolation_config", lambda: {"turn_isolation": True})
+    ensure_row = server._ensure_session_db_row
     for name in ("_enable_gateway_prompts", "_schedule_agent_build", "_schedule_resume_hydration",
                  "_schedule_session_cap_enforcement", "_maybe_schedule_auto_continue",
                  "_ensure_session_db_row", "_persist_branch_seed", "_install_borrowed_lease",
@@ -81,21 +84,27 @@ def resume_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_run_prompt_submit", run_prompt)
     try:
         yield SimpleNamespace(db=db, configs=configs, launch=launch, secondary=secondary,
-                              builds=builds, observed=observed)
+                              builds=builds, observed=observed, ensure_row=ensure_row)
     finally:
         db.close()
 
 
-def _resume(h, path, effort="xhigh", profile=None, follows=False):
+def _resume(h, path, effort="xhigh", profile=None, follows=False, *, explicit=True):
     model_config: dict = {"provider": "openai"}
     if effort != "missing":
         model_config["reasoning_config"] = None if effort is None else (
             {} if effort == "empty" else parse_reasoning_effort(effort))
+    if explicit and isinstance(model_config.get("reasoning_config"), dict):
+        model_config["reasoning_config_override"] = copy.deepcopy(model_config["reasoning_config"])
     if follows:
         model_config["follow_profile_config"] = True
     h.db.create_session("stored", source="desktop", model="saved", model_config=model_config)
+    return _resume_stored(h, path, profile)
+
+
+def _resume_stored(h, path, profile=None, stored="stored"):
     response = server.handle_request({"id": "resume", "method": "session.resume", "params": {
-        "session_id": "stored", "source": "desktop", "profile": profile,
+        "session_id": stored, "source": "desktop", "profile": profile,
         "defer_history": path == "deferred", "eager_build": path == "eager"}})
     assert "error" not in response, response
     sid = response["result"]["session_id"]
@@ -121,6 +130,27 @@ def _send_twice(h, monkeypatch, sid, parent):
         return frames
     finally:
         host.close()
+
+
+@pytest.mark.parametrize("path", ["cold", "deferred", "eager"])
+def test_effective_runtime_writer_does_not_manufacture_a_pin(resume_harness, monkeypatch, path):
+    h = resume_harness
+    agent = server._make_agent("original", "stored")
+    agent._session_db = h.db
+    agent._session_init_model_config = {"reasoning_config": parse_reasoning_effort("high")}
+    server._init_session("original", "stored", agent, [])
+    original = server._sessions["original"]
+    assert h.ensure_row(original)
+    server._persist_live_session_runtime(original)
+    row = json.loads(h.db.get_session("stored")["model_config"])
+    assert row["reasoning_config"] == parse_reasoning_effort("high")
+    assert "reasoning_config_override" not in row
+    server._sessions.clear()
+    h.configs[str(h.launch)]["agent"]["reasoning_effort"] = "medium"
+    sid, parent, _info = _resume_stored(h, path)
+    _send_twice(h, monkeypatch, sid, parent)
+    assert h.observed == [parse_reasoning_effort("medium")] * 2
+    assert parent.get("create_reasoning_override") is None
 
 
 @pytest.mark.parametrize("path", ["cold", "deferred", "eager"])
@@ -196,3 +226,50 @@ def test_unpinned_resume_metadata_uses_owning_profile_policy(resume_harness, pat
     _sid, parent, info = _resume(h, path, "missing", "secondary")
     assert info.get("reasoning_effort") == ("none" if per_model else "low")
     assert parent.get("create_reasoning_override") is None
+
+
+@pytest.mark.parametrize("path", ["cold", "deferred", "eager"])
+def test_inherited_snapshot_follows_edited_profile_on_two_sends(resume_harness, monkeypatch, path):
+    h = resume_harness
+    h.configs[str(h.launch)]["agent"]["reasoning_effort"] = "medium"
+    sid, parent, _info = _resume(h, path, "high", explicit=False)
+    _send_twice(h, monkeypatch, sid, parent)
+    assert h.observed == [parse_reasoning_effort("medium")] * 2
+    assert parent.get("create_reasoning_override") is None
+
+
+@pytest.mark.parametrize("path", ["deferred", "eager"])
+def test_inherited_snapshot_uses_real_destination_model_policy(resume_harness, monkeypatch, path):
+    from tests.tui_gateway.test_send_reasoning_override import _agent
+
+    h = resume_harness
+    h.configs[str(h.launch)]["agent"]["reasoning_overrides"] = {"other": "low"}
+    _sid, parent, _info = _resume(h, path, "high", explicit=False)
+    agent = _agent("saved")
+    parent["agent"] = agent
+    if path == "deferred":
+        kwargs = server._deferred_build_agent_kwargs(parent, h.db)
+        agent.reasoning_config = kwargs.get("reasoning_config_override") or parse_reasoning_effort("high")
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda *a, **kw: None)
+    monkeypatch.setattr("agent.agent_runtime_helpers._build_switched_client", lambda *a: None)
+    for name in ("_restart_slash_worker", "_persist_live_session_system_prompt", "_append_model_switch_marker",
+                 "_emit_session_info"):
+        monkeypatch.setattr(server, name, lambda *a, **kw: None)
+    result = SimpleNamespace(new_model="other", target_provider="openai", api_key="synthetic-key",
+                             base_url="https://synthetic.invalid/v1", api_mode="chat_completions",
+                             runtime_capabilities={})
+    server._commit_agent_switch("sid", parent, agent, result, "saved", None)
+    assert agent.model == "other"
+    assert agent.reasoning_config == parse_reasoning_effort("low")
+    assert parent.get("create_reasoning_override") is None
+
+
+@pytest.mark.parametrize("overrides", [None, {"model_override": {"model": "saved"}}])
+def test_resume_metadata_never_hydrates_external_secrets(resume_harness, monkeypatch, overrides):
+    calls = []
+    monkeypatch.setattr("hermes_cli.env_loader.hydrate_profile_secret_sources", lambda *a: calls.append(a))
+    kwargs = {} if overrides is None else {"runtime_overrides": overrides}
+    info = server._lazy_resume_info(str(resume_harness.secondary), profile="secondary", **kwargs)
+    if overrides is not None:
+        assert info["reasoning_effort"] == "none"
+    assert calls == []
