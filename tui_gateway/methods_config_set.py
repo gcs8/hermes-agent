@@ -364,7 +364,7 @@ def _set_reasoning(rid, params, key, value, session):
     else:  # session-scoped like the gateway's `/reasoning <level>`; a menu pick must not rewrite the global
         session["create_reasoning_override"] = parsed
     if session and session.get("agent") is not None:
-        session["agent"].reasoning_config = parsed
+        _set_agent_reasoning_config(session["agent"], parsed)
         _persist_live_session_runtime(session)
         _emit_session_info(params.get("session_id", ""), session)
     return _kv(rid, key, arg)

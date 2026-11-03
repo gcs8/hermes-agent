@@ -292,6 +292,7 @@ class ComputeHost:
             if claim == "busy":
                 self._reply("turn.error", sid, request_id, message="session busy")
                 return
+            self._sync_turn_reasoning(server, session, frame)
             turn_started_at = time.time()
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):
@@ -384,6 +385,25 @@ class ComputeHost:
         # samples age without requiring synchronized wall clocks in the parent.
         self._transport.write({"jsonrpc": "2.0", "method": "compute_host.activity", "params": {
             "session_id": sid, "turn_id": turn_id, "activity_ns": activity_ns}})
+
+    def _sync_turn_reasoning(self, server: Any, session: dict, frame: dict[str, Any]) -> None:
+        """Adopt the parent's effort only after claiming an idle child, before turn persistence.
+
+        A missing field is an older sender, not a reset. Explicit None releases a previous
+        session pin to this child's owning profile. Fresh and reused children keep the pin
+        so a queued model switch cannot replace it with destination defaults.
+        """
+        if "reasoning_config_override" not in frame:
+            return
+        reasoning = frame["reasoning_config_override"]
+        if reasoning is not None:
+            session["create_reasoning_override"] = dict(reasoning)
+        elif session.pop("create_reasoning_override", None) is not None:
+            with server._session_profile_runtime_scope(session, hydrate_secrets=False):
+                reasoning = server._load_reasoning_config(session["agent"].model)
+        else:
+            return
+        server._set_agent_reasoning_config(session["agent"], reasoning)
 
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
