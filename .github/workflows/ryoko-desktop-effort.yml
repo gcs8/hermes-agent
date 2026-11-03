@@ -66,13 +66,23 @@ jobs:
           cd "$QUALIFICATION_ROOT/libatomic"
           test "$(dpkg --print-architecture)" = amd64
           mkdir -p apt/lists/partial apt/cache/archives/partial
-          # Refresh only job-owned lists; preserve distro sources/signature trust,
-          # but disable host maintenance hooks and lock files for this private cache.
+          # Use only authenticated HTTPS Ubuntu metadata in the private job cache.
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: https://archive.ubuntu.com/ubuntu/' \
+            'Suites: noble noble-updates' \
+            'Components: main' \
+            'Architectures: amd64' \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' > ubuntu.sources
           printf '%s\n' \
             "Dir::State::lists \"$PWD/apt/lists\";" \
             "Dir::Cache \"$PWD/apt/cache\";" \
+            "Dir::Etc::sourcelist \"$PWD/ubuntu.sources\";" \
+            'Dir::Etc::sourceparts "-";' \
             'Debug::NoLocking "true";' \
             'Acquire::Languages "none";' \
+            'APT::Update::Error-Mode "any";' \
+            '#clear APT::Update::Pre-Invoke;' \
             '#clear APT::Update::Post-Invoke;' \
             '#clear APT::Update::Post-Invoke-Success;' > apt.conf
           apt-get -c "$PWD/apt.conf" update
