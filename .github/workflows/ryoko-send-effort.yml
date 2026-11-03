@@ -65,7 +65,7 @@ jobs:
         with:
           ref: 99e93a166d152a83a3f323e7541990213dd92b45
           path: source
-          fetch-depth: 0
+          fetch-depth: 3
           persist-credentials: false
       - name: Verify source provenance before executing source commands
         env:
@@ -85,13 +85,13 @@ jobs:
           BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
         run: |
           set -euo pipefail
-          env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py prepare --toolchain python --home "$QUALIFICATION_ROOT/state"
-          env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" GITHUB_PATH="$GITHUB_PATH" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py install --toolchain python --home "$QUALIFICATION_ROOT/state"
+          env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py prepare --toolchain python --home "$QUALIFICATION_ROOT/state"
+          env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" GITHUB_PATH="$GITHUB_PATH" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py install --toolchain python --home "$QUALIFICATION_ROOT/state"
       - name: Build isolated project test environment through PM
         working-directory: source
         run: |
           set -euo pipefail
-          env -i PATH="$PATH" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 "$HERMES_PYTHON" -m pm.build_env --source . --out "$QUALIFICATION_ROOT/venv" --group dev --group test --cache "$QUALIFICATION_ROOT/cache" --explicit
+          env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 "$HERMES_PYTHON" -m pm.build_env --source . --out "$QUALIFICATION_ROOT/venv" --group dev --group test --cache "$QUALIFICATION_ROOT/cache" --explicit
       - name: Execute bounded native qualification
         id: native
         env:

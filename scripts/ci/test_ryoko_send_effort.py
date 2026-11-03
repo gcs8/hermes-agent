@@ -175,6 +175,28 @@ class Contracts(unittest.TestCase):
                 self.assertTrue(request.full_url.endswith("/statuses/" + control.SOURCE))
                 self.assertNotIn("synthetic-only", json.dumps(body))
 
+    def test_clean_bootstrap_preserves_loader_without_secrets(self):
+        lines = [line.strip() for line in WORKFLOW.splitlines() if line.strip().startswith("env -i ")]
+        self.assertEqual(len(lines), 3)
+        marker = self.root / "executed"
+        stub = self.root / "bootstrap"
+        stub.write_text('#!/bin/sh\n'
+                        '[ "${LD_LIBRARY_PATH-}" = "synthetic-loader" ] || exit 71\n'
+                        '[ -z "${SENTINEL_SECRET+x}" ] || exit 72\n'
+                        f"printf 'ok\\n' >> '{marker}'\n")
+        stub.chmod(0o700)
+        env = {key: str(self.root) for key in
+               ("HOME", "TMPDIR", "HERMES_HOME", "HERMES_RUNTIME_DIR", "QUALIFICATION_ROOT",
+                "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH")}
+        env.update(PATH="/usr/bin:/bin", LD_LIBRARY_PATH="synthetic-loader",
+                   SENTINEL_SECRET="must-not-inherit", BOOTSTRAP_PYTHON=str(stub), HERMES_PYTHON=str(stub))
+        for line in lines:
+            with self.subTest(line=line):
+                broken = line.replace('LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" ', '')
+                self.assertEqual(subprocess.run(["bash", "-c", broken], env=env, check=False).returncode, 71)
+                self.assertEqual(subprocess.run(["bash", "-c", line], env=env, check=False).returncode, 0)
+        self.assertEqual(marker.read_text().splitlines(), ["ok"] * 3)
+
     def test_workflow_boundaries(self):
         self.assertEqual(WORKFLOW.count("runs-on: hermes-linux-qualification"), 2)
         self.assertIn("group: hermes-linux-qualification\n  cancel-in-progress: false", WORKFLOW)
