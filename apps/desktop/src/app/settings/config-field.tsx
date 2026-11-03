@@ -175,11 +175,13 @@ export function ConfigField({
             <SelectItem key={option || EMPTY_SELECT_VALUE} value={option || EMPTY_SELECT_VALUE}>
               {option
                 ? (optionLabels?.[option] ?? prettyName(option))
-                : schemaKey === 'display.personality'
-                  ? c.none
-                  : schemaKey === 'memory.provider'
-                    ? c.builtinOnly
-                    : c.noneParen}
+                : schemaKey === 'delegation.reasoning_effort'
+                  ? c.inherit
+                  : schemaKey === 'display.personality'
+                    ? c.none
+                    : schemaKey === 'memory.provider'
+                      ? c.builtinOnly
+                      : c.noneParen}
             </SelectItem>
           ))}
         </SelectContent>

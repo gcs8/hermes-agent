@@ -3171,6 +3171,7 @@
     "settings.config.emptyTitle",
     "settings.config.failedLoad",
     "settings.config.imported",
+    "settings.config.inherit",
     "settings.config.invalidJson",
     "settings.config.keepAwakeAlways",
     "settings.config.keepAwakeDesc",

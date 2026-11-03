@@ -587,6 +587,7 @@ export const arSettings = {
         'علبة النظام غير متاحة. ستُصغّر النوافذ وتُغلق كالمعتاد. أوقف هذا الخيار ثم فعّله لإعادة المحاولة.',
       none: 'لا شيء',
       noneParen: '(لا شيء)',
+      inherit: 'وراثة',
       notSet: 'غير مضبوط',
       commaSeparated: 'قيم مفصولة بفواصل',
       searchPlaceholder: 'بحث…',

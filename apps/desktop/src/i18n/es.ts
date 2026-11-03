@@ -1514,6 +1514,7 @@ export const esOverrides = {
         'La bandeja del sistema no está disponible. Las ventanas se minimizarán y cerrarán con normalidad. Desactiva y vuelve a activar esta opción para reintentarlo.',
       none: 'Ninguno',
       noneParen: '(ninguno)',
+      inherit: 'Heredar',
       builtinOnly: 'Solo integradas',
       notSet: 'Sin definir',
       commaSeparated: 'valores separados por comas',

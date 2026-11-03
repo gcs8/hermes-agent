@@ -1221,6 +1221,7 @@ export const zhOverrides = {
       minimizeToTrayUnavailable: '系统托盘不可用。窗口将正常最小化和关闭。关闭此选项后重新开启即可重试。',
       none: '无',
       noneParen: '(无)',
+      inherit: '继承',
       builtinOnly: '仅内置',
       notSet: '未设置',
       commaSeparated: '逗号分隔的值',

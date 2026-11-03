@@ -1171,6 +1171,7 @@ export const en: Translations = {
         'The system tray is unavailable. Windows will minimize and close normally. Turn this off and on to retry.',
       none: 'None',
       noneParen: '(none)',
+      inherit: 'Inherit',
       builtinOnly: 'Built-in only',
       notSet: 'Not set',
       commaSeparated: 'comma-separated values',
