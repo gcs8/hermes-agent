@@ -65,9 +65,20 @@ jobs:
           mkdir -p "$QUALIFICATION_ROOT/libatomic"
           cd "$QUALIFICATION_ROOT/libatomic"
           test "$(dpkg --print-architecture)" = amd64
-          apt-cache policy libatomic1 > "$QUALIFICATION_EVIDENCE/libatomic-policy.txt"
-          # apt verifies the archive against the configured distribution metadata.
-          apt-get download libatomic1
+          mkdir -p apt/lists/partial apt/cache/archives/partial
+          # Refresh only job-owned lists; preserve distro sources/signature trust,
+          # but disable host maintenance hooks and lock files for this private cache.
+          printf '%s\n' \
+            "Dir::State::lists \"$PWD/apt/lists\";" \
+            "Dir::Cache \"$PWD/apt/cache\";" \
+            'Debug::NoLocking "true";' \
+            'Acquire::Languages "none";' \
+            '#clear APT::Update::Post-Invoke;' \
+            '#clear APT::Update::Post-Invoke-Success;' > apt.conf
+          apt-get -c "$PWD/apt.conf" update
+          apt-cache -c "$PWD/apt.conf" policy libatomic1 > "$QUALIFICATION_EVIDENCE/libatomic-policy.txt"
+          # apt verifies the archive against the fresh signed distribution index.
+          apt-get -c "$PWD/apt.conf" download libatomic1
           shopt -s nullglob
           packages=(*.deb)
           test "${#packages[@]}" -eq 1
