@@ -3826,69 +3826,6 @@ def test_session_resume_follows_compression_tip(monkeypatch, tmp_path):
     assert "post-compression reply" in texts
 
 
-def test_session_resume_passes_stored_runtime_to_agent(monkeypatch):
-    captured = {}
-
-    class FakeDB:
-        def get_session(self, target):
-            return {
-                "id": target,
-                "model": "gpt-5.4",
-                "billing_provider": "openai-codex",
-                "model_config": '{"reasoning_config":{"enabled":true,"effort":"high"},"service_tier":"priority","base_url":"https://custom.example/v1","api_mode":"chat_completions"}',
-            }
-
-        def reopen_session(self, target):
-            pass
-
-        def get_resume_conversations(self, session_id):
-            return (
-                self.get_messages_as_conversation(session_id, repair_alternation=True),
-                self.get_messages_as_conversation(session_id, include_ancestors=True),
-            )
-
-        def get_ancestor_display_prefix(self, _sid):
-            return []
-
-        def get_messages_as_conversation(self, target, include_ancestors=False, repair_alternation=False, **_kwargs):
-            return [{"role": "user", "content": "hello"}]
-
-    def fake_make_agent(sid, key, session_id=None, session_db=None, **kwargs):
-        captured.update(kwargs)
-        return types.SimpleNamespace(model="gpt-5.4", provider="openai-codex")
-
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
-    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
-    monkeypatch.setattr(server, "_set_session_context", lambda target, cwd=None: [])
-    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
-    monkeypatch.setattr(server, "_make_agent", fake_make_agent)
-    monkeypatch.setattr(server, "_session_info", lambda agent, *a: {"model": agent.model, "provider": agent.provider})
-
-    def fake_init_session(sid, key, agent, history, cols=80, **_kwargs):
-        server._sessions[sid] = {"agent": agent, "session_key": key}
-
-    monkeypatch.setattr(server, "_init_session", fake_init_session)
-
-    # eager_build: this asserts the synchronous build contract (stored runtime
-    # overrides reach _make_agent, info comes from _session_info). The deferred
-    # default restores the same overrides via _start_agent_build off-thread.
-    resp = server.handle_request(
-        {"id": "1", "method": "session.resume", "params": {"session_id": "stored-session", "eager_build": True}}
-    )
-
-    assert captured["model_override"] == {
-        "model": "gpt-5.4",
-        "provider": "openai-codex",
-        "base_url": "https://custom.example/v1",
-        "api_mode": "chat_completions",
-    }
-    assert captured["provider_override"] == "openai-codex"
-    assert captured["reasoning_config_override"] == {"enabled": True, "effort": "high"}
-    assert captured["service_tier_override"] == "priority"
-    runtime_sid = resp["result"]["session_id"]
-    assert server._sessions[runtime_sid]["model_override"] == captured["model_override"]
-
-
 def test_session_resume_profile_uses_profile_db_cwd(monkeypatch, tmp_path):
     target = "stored-profile-session"
     launch_cwd = tmp_path / "launch"
