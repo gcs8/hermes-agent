@@ -79,6 +79,46 @@ jobs:
           spec.loader.exec_module(control)
           control.provenance(Path('source'))
           PY
+      - name: Stage Node runtime library without privilege escalation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$QUALIFICATION_ROOT/libatomic"
+          cd "$QUALIFICATION_ROOT/libatomic"
+          test "$(dpkg --print-architecture)" = amd64
+          mkdir -p apt/lists/partial apt/cache/archives/partial
+          # Use only authenticated HTTPS Ubuntu metadata in the private job cache.
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: https://archive.ubuntu.com/ubuntu/' \
+            'Suites: noble noble-updates' \
+            'Components: main' \
+            'Architectures: amd64' \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' > ubuntu.sources
+          printf '%s\n' \
+            "Dir::State::lists \"$PWD/apt/lists\";" \
+            "Dir::Cache \"$PWD/apt/cache\";" \
+            "Dir::Etc::sourcelist \"$PWD/ubuntu.sources\";" \
+            'Dir::Etc::sourceparts "-";' \
+            'Debug::NoLocking "true";' \
+            'Acquire::Languages "none";' \
+            'APT::Update::Error-Mode "any";' \
+            '#clear APT::Update::Pre-Invoke;' \
+            '#clear APT::Update::Post-Invoke;' \
+            '#clear APT::Update::Post-Invoke-Success;' > apt.conf
+          apt-get -c "$PWD/apt.conf" update
+          apt-cache -c "$PWD/apt.conf" policy libatomic1 > "$QUALIFICATION_EVIDENCE/libatomic-policy.txt"
+          # apt verifies the archive against the fresh signed distribution index.
+          apt-get -c "$PWD/apt.conf" download libatomic1
+          shopt -s nullglob
+          packages=(*.deb)
+          test "${#packages[@]}" -eq 1
+          sha256sum "${packages[0]}" > "$QUALIFICATION_EVIDENCE/libatomic-package.sha256"
+          dpkg-deb --info "${packages[0]}" > "$QUALIFICATION_EVIDENCE/libatomic-package.txt"
+          dpkg-deb --extract "${packages[0]}" extracted
+          library="$QUALIFICATION_ROOT/libatomic/extracted/usr/lib/x86_64-linux-gnu"
+          test -f "$library/libatomic.so.1"
+          echo "LD_LIBRARY_PATH=$library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Prepare source-pinned Python and Node toolchains
         id: toolchain
         working-directory: source

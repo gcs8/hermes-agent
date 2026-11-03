@@ -169,6 +169,97 @@ class Contracts(unittest.TestCase):
                 self.assertEqual(subprocess.run(["bash", "-o", "pipefail", "-c", line], env=env, check=False).returncode, 0)
         self.assertEqual(marker.read_text().splitlines(), ["ok"] * 3)
 
+    def library_shell(self):
+        name = "Stage Node runtime library without privilege escalation"
+        self.assertEqual(WORKFLOW.count("      - name: " + name + "\n"), 1)
+        self.assertLess(WORKFLOW.index(name), WORKFLOW.index("Prepare source-pinned Python and Node toolchains"))
+        step = WORKFLOW.split("      - name: " + name + "\n", 1)[1].split("      - name:", 1)[0]
+        return "\n".join(line[10:] for line in step.split("        run: |\n", 1)[1].splitlines()) + "\n"
+
+    def test_library_bootstrap_emitted_shell(self):
+        shell = self.library_shell()
+        binary = self.root / "bin"
+        binary.mkdir()
+        stub = binary / "native-stub"
+        stub.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+from pathlib import Path
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+with open(os.environ['CALLS'], 'a') as stream:
+    stream.write(json.dumps([name, *args]) + '\\n')
+if name == 'dpkg':
+    assert args == ['--print-architecture']
+    print('amd64')
+elif name in ('apt-get', 'apt-cache'):
+    assert args[0] == '-c'
+    config = Path(args[1])
+    assert config == Path.cwd() / 'apt.conf'
+    text = config.read_text()
+    for value in [f'Dir::State::lists "{Path.cwd()}/apt/lists";',
+                  f'Dir::Cache "{Path.cwd()}/apt/cache";',
+                  f'Dir::Etc::sourcelist "{Path.cwd()}/ubuntu.sources";',
+                  'Dir::Etc::sourceparts "-";', 'APT::Update::Error-Mode "any";',
+                  '#clear APT::Update::Pre-Invoke;', '#clear APT::Update::Post-Invoke;',
+                  '#clear APT::Update::Post-Invoke-Success;']:
+        assert value in text, value
+    sources = Path('ubuntu.sources').read_text()
+    assert sources == ('Types: deb\\nURIs: https://archive.ubuntu.com/ubuntu/\\n'
+                       'Suites: noble noble-updates\\nComponents: main\\nArchitectures: amd64\\n'
+                       'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\\n')
+    assert 'trusted' not in sources.lower()
+    assert 'AllowUnauthenticated' not in text and 'AllowInsecure' not in text
+    if args[2:] == ['update']:
+        if os.environ.get('FAIL_UPDATE') == '1':
+            sys.exit(73)
+    elif args[2:] == ['download', 'libatomic1']:
+        Path('libatomic1_synthetic.deb').write_text('synthetic package')
+    else:
+        assert name == 'apt-cache' and args[2:] == ['policy', 'libatomic1']
+elif name == 'dpkg-deb':
+    assert args[1] == 'libatomic1_synthetic.deb'
+    if args[0] == '--extract':
+        assert args[2] == 'extracted'
+        target = Path('extracted/usr/lib/x86_64-linux-gnu/libatomic.so.1')
+        target.parent.mkdir(parents=True)
+        target.touch()
+    else:
+        assert args[0] == '--info'
+else:
+    raise AssertionError(name)
+''')
+        stub.chmod(0o700)
+        for name in ("apt-get", "apt-cache", "dpkg", "dpkg-deb"):
+            (binary / name).symlink_to(stub)
+        for case in ("pass", "update-fails", "unsigned-source", "ambient-sources", "ambient-hook"):
+            with self.subTest(case=case):
+                root = self.root / case
+                root.mkdir()
+                (root / "evidence").mkdir()
+                output = root / "github-env"
+                output.touch()
+                env = {"PATH": f"{binary}:/usr/bin:/bin", "QUALIFICATION_ROOT": str(root),
+                       "QUALIFICATION_EVIDENCE": str(root / "evidence"), "GITHUB_ENV": str(output),
+                       "LD_LIBRARY_PATH": "existing-python-loader", "CALLS": str(root / "calls")}
+                candidate = shell
+                if case == "update-fails": env["FAIL_UPDATE"] = "1"
+                if case == "unsigned-source": candidate = candidate.replace("Signed-By:", "Unsigned:")
+                if case == "ambient-sources": candidate = candidate.replace('sourceparts "-"', 'sourceparts "/etc/apt/sources.list.d"')
+                if case == "ambient-hook": candidate = candidate.replace("#clear APT::Update::Post-Invoke;", "")
+                result = subprocess.run(["bash", "-euo", "pipefail", "-c", candidate], env=env,
+                                        capture_output=True, text=True, timeout=15, check=False)
+                calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+                if case == "pass":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual([row[0] for row in calls],
+                                     ["dpkg", "apt-get", "apt-cache", "apt-get", "dpkg-deb", "dpkg-deb"])
+                    expected = root / "libatomic/extracted/usr/lib/x86_64-linux-gnu"
+                    self.assertEqual(output.read_text(), f"LD_LIBRARY_PATH={expected}:existing-python-loader\n")
+                    self.assertTrue((root / "evidence/libatomic-package.sha256").is_file())
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(output.read_text(), "")
+                    self.assertFalse(any(row[0] == "dpkg-deb" for row in calls))
+
     def test_workflow_boundaries(self):
         self.assertEqual(WORKFLOW.count("runs-on: hermes-linux-qualification"), 2)
         self.assertIn("group: hermes-linux-qualification\n  cancel-in-progress: false", WORKFLOW)
