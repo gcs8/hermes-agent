@@ -24,7 +24,7 @@ import {
   setCurrentCwdTransient,
   setCurrentFastMode,
   setCurrentPersonality,
-  setCurrentReasoningEffort,
+  setCurrentReasoningEffortTransient,
   setCurrentReasoningEffortWire,
   setCurrentServiceTier,
   setCurrentUsage,
@@ -272,7 +272,7 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
       }
 
       if (typeof payload?.reasoning_effort === 'string') {
-        setCurrentReasoningEffort(payload.reasoning_effort)
+        setCurrentReasoningEffortTransient(payload.reasoning_effort)
       }
 
       if (typeof payload?.reasoning_effort_wire === 'string') {
