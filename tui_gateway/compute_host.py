@@ -47,6 +47,10 @@ class _HostTransport:
     def close(self) -> None:
         return None
 
+    def turn_state(self, sid: str, state: dict) -> None:
+        self.write({"jsonrpc": "2.0", "method": "compute_host.turn_state",
+                    "params": {"session_id": sid, **state}})
+
 
 # Slice of ``ComputeHost.shutdown``'s budget held back for the post-drain finalize: the
 # supervisor SIGKILLs the host 10s (= default ``wait``) after SIGTERM, so a drain that ate

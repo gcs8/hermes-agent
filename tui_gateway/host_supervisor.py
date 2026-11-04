@@ -169,6 +169,7 @@ class HostSupervisor:
         self._stopped_respawning = False
         self._restart_times: list[float] = []
         self._pending_turns: dict[str, tuple[str, Callable[[dict], None] | None]] = {}
+        self._local_turns: dict[str, str] = {}
         self._pending_controls: dict[str, queue.Queue[dict]] = {}
         # request_id -> (registered_at, handler) for control waiters that timed out while their
         # host work still runs, so the eventual control.ack is not silently dropped.
@@ -268,7 +269,7 @@ class HostSupervisor:
         handling or :meth:`_fail_pending_turns`, all under ``self._lock``.
         """
         with self._lock:
-            return any(s == sid for s, _cb in self._pending_turns.values())
+            return sid in self._local_turns or any(s == sid for s, _cb in self._pending_turns.values())
 
     def _await_reply(self, frame: dict[str, Any], request_id: str, timeout: float) -> dict:
         """Send ``frame`` and block for the host reply carrying ``request_id``."""
@@ -434,6 +435,7 @@ class HostSupervisor:
             logger.debug("compute host heartbeat: %s", frame)
         elif ftype == "rpc":
             if isinstance(frame.get("message"), dict):
+                self._track_local_turn(frame["message"])
                 self.rpc_sink(frame["message"])
         elif ftype in ("turn.end", "turn.error"):
             with self._lock:
@@ -453,10 +455,27 @@ class HostSupervisor:
         self._fail_pending_turns(reason="crash", message=f"compute host exited with code {code}")
         self._maybe_respawn_after_crash()
 
+    def _track_local_turn(self, message: dict) -> None:
+        if message.get("method") != "compute_host.turn_state":
+            return
+        params = message.get("params") or {}
+        sid, turn_id = params.get("session_id"), params.get("turn_id")
+        if not isinstance(sid, str) or not isinstance(turn_id, str):
+            return
+        with self._lock:
+            if params.get("running"):
+                self._local_turns[sid] = turn_id
+            elif self._local_turns.get(sid) == turn_id:
+                self._local_turns.pop(sid, None)
+
     def _fail_pending_turns(self, *, reason: str, message: str) -> None:
         with self._lock:
             pending = self._pending_turns
             self._pending_turns = {}
+            local_turns, self._local_turns = self._local_turns, {}
+        for sid, turn_id in local_turns.items():
+            self.rpc_sink({"jsonrpc": "2.0", "method": "compute_host.turn_state", "params": {
+                "session_id": sid, "turn_id": turn_id, "running": False, "error": message}})
         failure = {"reason": reason, "message": message}
         for request_id, (sid, cb) in pending.items():
             self.rpc_sink({"jsonrpc": "2.0", "method": "event",

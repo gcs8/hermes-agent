@@ -120,8 +120,10 @@ def test_supervisor_reports_pending_turns_per_session():
     supervisor = HostSupervisor.__new__(HostSupervisor)  # __init__ would spawn a child
     supervisor._lock = threading.RLock()
     supervisor._pending_turns = {"req-a": ("sid-a", None), "req-b": ("sid-b", None)}
+    supervisor._local_turns = {"sid-local": "automatic-turn"}
 
     assert supervisor.has_pending_turn("sid-a") is True
     assert supervisor.has_pending_turn("sid-c") is False
+    assert supervisor.has_pending_turn("sid-local") is True
     supervisor._pending_turns.pop("req-a")
     assert supervisor.has_pending_turn("sid-a") is False

@@ -105,7 +105,8 @@ def test_turn_start_streams_deltas_then_turn_end_with_history_identity(turn_env)
               and f["message"]["method"] == "event" and f["message"]["params"]["type"] == "message.delta"]
     assert [d["message"]["params"]["payload"]["text"] for d in deltas] == ["a ", "b ", "c "]
     assert {d["sid"] for d in deltas} == {sid}
-    assert any(f["type"] == "rpc" and f["message"]["params"]["type"] == "message.complete" for f in frames)
+    assert any(f["type"] == "rpc" and f["message"]["method"] == "event"
+               and f["message"]["params"]["type"] == "message.complete" for f in frames)
 
     # turn.end carries the transcript identity the parent uses to reconcile its mirror.
     assert end["sid"] == sid and end["request_id"] == "turn"
@@ -250,7 +251,8 @@ def test_interrupt_frame_acks_and_marks_turn_interrupted(turn_env):
     server._sessions[sid] = _session(_agent([f"{i:03d} " for i in range(200)], delay_s=0.01, interrupt=stop))
     try:
         host.handle_frame({"type": "turn.start", "sid": sid, "request_id": "turn", "prompt": "go"})
-        _wait(out, lambda f: f["type"] == "rpc" and f["message"]["params"]["type"] == "message.delta")
+        _wait(out, lambda f: f["type"] == "rpc" and f["message"]["method"] == "event"
+              and f["message"]["params"]["type"] == "message.delta")
         host.handle_frame({"type": "interrupt", "sid": sid, "request_id": "stop"})
         ack = _wait(out, lambda f: f["type"] == "interrupt.ack")
         end = _wait(out, lambda f: f["type"] == "turn.end")
@@ -261,7 +263,8 @@ def test_interrupt_frame_acks_and_marks_turn_interrupted(turn_env):
 
     assert ack["applied"] is True and ack["request_id"] == "stop" and "applied_ns" in ack
     assert end["interrupted"] is True
-    deltas = sum(1 for f in _frames(out) if f["type"] == "rpc" and f["message"]["params"]["type"] == "message.delta")
+    deltas = sum(1 for f in _frames(out) if f["type"] == "rpc" and f["message"]["method"] == "event"
+                 and f["message"]["params"]["type"] == "message.delta")
     assert 0 < deltas < 200
 
 
