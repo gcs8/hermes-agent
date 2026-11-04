@@ -46,7 +46,7 @@ class Contracts(unittest.TestCase):
         return control.validate_junit(path, next(iter(control.FILES)), 3, set() if seen is None else seen)
 
     def test_frozen_coverage(self):
-        self.assertEqual((len(control.FILES), sum(control.FILES.values())), (26, 844))
+        self.assertEqual((len(control.FILES), sum(control.FILES.values())), (26, 847))
 
     def test_valid_xml(self):
         self.assertEqual(self.validate(self.xml()), 3)

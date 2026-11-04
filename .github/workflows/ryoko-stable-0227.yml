@@ -22,7 +22,7 @@ jobs:
           github.event.pull_request.base.repo.id == 1260443943 &&
           github.event.pull_request.head.ref == 'ci/session-busy-20261104' &&
           github.event.pull_request.head.sha == vars.HERMES_BUSY_WORKFLOW_SHA &&
-          '28b6c169d21d34a38ef36edac96629c73089a47f' == vars.HERMES_BUSY_SOURCE_SHA }}
+          '2a0b47cfe657fdfd07c58cf15ace3f8f0a963a6c' == vars.HERMES_BUSY_SOURCE_SHA }}
     runs-on: hermes-linux-qualification
     timeout-minutes: 30
     outputs:
@@ -65,7 +65,7 @@ jobs:
           "$BOOTSTRAP_PYTHON" -I controls/scripts/ci/test_ryoko_stable_0227.py 2>&1 | tee "$QUALIFICATION_EVIDENCE/setup/control-tests.log"
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
-          ref: 28b6c169d21d34a38ef36edac96629c73089a47f
+          ref: 2a0b47cfe657fdfd07c58cf15ace3f8f0a963a6c
           path: source
           fetch-depth: 16
           persist-credentials: false
@@ -167,7 +167,7 @@ jobs:
           github.event.pull_request.base.repo.id == 1260443943 &&
           github.event.pull_request.head.ref == 'ci/session-busy-20261104' &&
           github.event.pull_request.head.sha == vars.HERMES_BUSY_WORKFLOW_SHA &&
-          '28b6c169d21d34a38ef36edac96629c73089a47f' == vars.HERMES_BUSY_SOURCE_SHA }}
+          '2a0b47cfe657fdfd07c58cf15ace3f8f0a963a6c' == vars.HERMES_BUSY_SOURCE_SHA }}
     runs-on: hermes-linux-qualification
     timeout-minutes: 5
     permissions:
