@@ -1511,6 +1511,7 @@ export const deOverrides = {
         'Der Infobereich ist nicht verfügbar. Fenster werden normal minimiert und geschlossen. Schalten Sie die Option aus und wieder ein, um es erneut zu versuchen.',
       none: 'Keine',
       noneParen: '(keine)',
+      inherit: 'Übernehmen',
       builtinOnly: 'Nur eingebaut',
       notSet: 'Nicht festgelegt',
       commaSeparated: 'durch Komma getrennte Werte',

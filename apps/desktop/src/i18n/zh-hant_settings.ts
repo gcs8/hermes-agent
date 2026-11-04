@@ -801,6 +801,7 @@ export const zhHantSettings = {
       minimizeToTrayUnavailable: '系統匣無法使用。視窗將正常最小化和關閉。關閉此選項後重新開啟即可重試。',
       none: '無',
       noneParen: '(無)',
+      inherit: '繼承',
       builtinOnly: '僅內建',
       notSet: '未設定',
       commaSeparated: '逗號分隔的值',

@@ -976,6 +976,7 @@ export interface Translations extends NoticeTranslations {
       minimizeToTrayUnavailable: string
       none: string
       noneParen: string
+      inherit: string
       builtinOnly: string
       notSet: string
       commaSeparated: string

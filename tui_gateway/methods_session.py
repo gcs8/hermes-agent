@@ -427,7 +427,14 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "running": False, "session_key": key, "show_reasoning": _load_show_reasoning(), "source": source,
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "transport": current_transport() or _stdio_transport,
-            "auth_user_id": _transport_auth_user_id(current_transport())}
+            "auth_user_id": _transport_auth_user_id(current_transport()),
+            # #107924: under dashboard.turn_isolation the lazy-session gate in
+            # _session_uses_compute_host is otherwise defeated 50ms after create by
+            # _schedule_agent_build below — by prompt time agent is set and the gate
+            # returns False, so the turn runs in-process and never spawns the
+            # compute-host child. Eagerly mark host ownership so the gate routes the
+            # first prompt to the child; the child rebuilds the agent from history.
+            "_compute_host_active": _turn_isolation_enabled()}
         _register_session_cwd(_sessions[sid])
         if idem_key is not None:
             _idempotency_keys[idem_key] = (sid, now)
@@ -643,6 +650,10 @@ class _Resume:
             self.target, cols=self.cols, cwd=cwd, history=history, lease=None, source=source,
             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
             profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd), **extra)
+        # #107924 also affects normal Desktop resumes: the deferred 50ms pre-warm
+        # populates agent before the user's next prompt, defeating the same lazy gate.
+        # Preserve host ownership across the resumed runtime just as session.create does.
+        record["_compute_host_active"] = _turn_isolation_enabled()
         if follows_profile:
             record.update(follow_profile_config=True, composer_override_profile=(
                 model_config.get("composer_override_profile") if overrides and overrides.get("model_override") else None))
@@ -661,8 +672,7 @@ class _Resume:
         return canonicalize_replay_history(raw), display, raw
 
     def info(self, cwd: str, overrides: dict) -> dict:
-        return _lazy_resume_info(cwd, model=(overrides.get("model_override") or {}).get("model") or "",
-                                 provider=overrides.get("provider_override") or "", profile=self.profile)
+        return _lazy_resume_info(cwd, profile=self.profile, runtime_overrides=overrides)
 
     def child_history(self, repair: bool) -> list:
         """The child's OWN conversation (no ancestors), row ids included."""
@@ -868,24 +878,6 @@ def _resume_reuse_live(ctx: _Resume, sid: str, session: dict) -> dict:
         return _resume_reuse_live_locked(ctx, sid, session)
 
 
-def _resume_reuse_live_locked(ctx: _Resume, sid: str, session: dict) -> dict:
-    """Reuse with _session_resume_lock already held (including the eager double-check)."""
-    if (refusal := _reattach_refusal(ctx.rid, sid, session)) is not None:
-        return refusal
-    _cancel_ws_orphan_reap(sid)  # unconditionally: the fast path must never race the reap Timer
-    payload = _live_session_payload(sid, session, cols=ctx.cols, touch=True, omit_messages=ctx.omit_messages,
-                                    transport=current_transport() or _stdio_transport,
-                                    inline_images=ctx.inline_images)
-    payload["resumed"] = ctx.target
-    if ctx.defer_history:
-        payload.update(messages=[], hydrating=bool(session.get("resume_hydrating")),
-                       message_count=int(session.get("resume_message_count") or payload["message_count"]))
-    # A lazy watch session never owns a run loop — overlay the child-run registry.
-    if session.get("agent") is None and _child_run_active(ctx.target, ctx.profile_home):
-        payload.update(running=True, status="streaming")
-    return _ok(ctx.rid, payload)
-
-
 def _resume_response(
     ctx: _Resume, sid: str, record: dict, *, info: dict, display: list = (), count_source: list | None = None,
     messages: list | None = None, message_count: int | None = None, running: bool = False,
@@ -1017,6 +1009,7 @@ def _resume_eager(ctx: _Resume) -> dict:
             if (session := _sessions.get(sid)) is not None:
                 if stored_runtime_overrides.get("model_override") is not None:
                     session["model_override"] = stored_runtime_overrides["model_override"]
+                _set_session_reasoning_override(session, stored_runtime_overrides.get("reasoning_config_override"))
                 model_config = _parse_model_config(ctx.found.get("model_config"), quiet=True)
                 if _row_follows_profile(ctx.found):
                     session["follow_profile_config"] = True

@@ -53,7 +53,6 @@ import {
   $currentFastMode,
   $currentModel,
   $currentProvider,
-  $currentReasoningEffort,
   $freshDraftKey,
   $messages,
   $messagingSessions,
@@ -1488,7 +1487,7 @@ describe('createBackendSessionForSend profile routing', () => {
     $currentModel.set('')
     $currentProvider.set('')
     setCurrentModelSource('')
-    $currentReasoningEffort.set('')
+    setCurrentReasoningEffort('')
     setNewChatWorkspaceTarget(undefined)
     vi.restoreAllMocks()
   })

@@ -39,6 +39,8 @@ on:
         type: boolean
         default: false
   pull_request:
+    # Maintained fork stable branches use their explicitly scoped qualification.
+    branches-ignore: ["ryoko/stable-*"]
   push:
     branches: [main]
 

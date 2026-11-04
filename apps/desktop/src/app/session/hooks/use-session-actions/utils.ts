@@ -40,7 +40,7 @@ import {
   setCurrentPersonality,
   setCurrentProvider,
   setCurrentProviderTransient,
-  setCurrentReasoningEffort,
+  setCurrentReasoningEffortTransient,
   setCurrentReasoningEffortWire,
   setCurrentServiceTier,
   setCurrentUsage,
@@ -2209,7 +2209,7 @@ function publishRuntimeToComposer(state: SessionRuntimeStatePatch): void {
   }
 
   if (state.reasoningEffort !== undefined) {
-    setCurrentReasoningEffort(state.reasoningEffort)
+    setCurrentReasoningEffortTransient(state.reasoningEffort)
   }
 
   if (state.reasoningEffortWire !== undefined) {
@@ -2351,7 +2351,7 @@ export function applyStoredSessionPreviewRuntimeInfo(
   // the coherence gate (#125336).
   setCurrentModelTransient(stored?.model || '')
   setCurrentProviderTransient('')
-  setCurrentReasoningEffort('')
+  setCurrentReasoningEffortTransient('')
   setCurrentServiceTier('')
   setCurrentFastMode(false)
   setYoloActive(false)

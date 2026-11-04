@@ -6,11 +6,13 @@ import {
   $activeSessionId,
   $currentBranch,
   $currentCwd,
+  $currentReasoningEffort,
   $selectedStoredSessionId,
   $workspaceCwdOwner,
   releaseWorkspaceCwdOwner,
   setCurrentBranch,
-  setCurrentCwd
+  setCurrentCwd,
+  setCurrentReasoningEffort
 } from '@/store/session'
 
 import { handleSessionInfoEvent } from './session-info'
@@ -60,6 +62,19 @@ function sessionInfoEvent({
 }
 
 describe('handleSessionInfoEvent workspace ownership', () => {
+  it.each(['high', ''])('viewing a session keeps the saved effort choice %s intact', picked => {
+    setCurrentReasoningEffort(picked)
+    const saved = localStorage.getItem('hermes.desktop.composer.reasoning-effort')
+    const ctx = sessionInfoEvent({ activeSessionId: 'runtime-1', cwd: '', explicitSid: 'runtime-1' })
+    ctx.payload = { ...ctx.payload, reasoning_effort: 'low' }
+
+    handleSessionInfoEvent(ctx)
+
+    expect($currentReasoningEffort.get()).toBe('low')
+    expect(localStorage.getItem('hermes.desktop.composer.reasoning-effort')).toBe(saved)
+    setCurrentReasoningEffort('')
+  })
+
   beforeEach(() => {
     $selectedStoredSessionId.set(null)
     $workspaceCwdOwner.set(null)

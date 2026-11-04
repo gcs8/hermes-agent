@@ -1519,6 +1519,7 @@ export const frOverrides = {
         'La zone de notification est indisponible. Les fenêtres seront réduites et fermées normalement. Désactivez puis réactivez cette option pour réessayer.',
       none: 'Aucun',
       noneParen: '(aucun)',
+      inherit: 'Hériter',
       builtinOnly: 'Intégré uniquement',
       notSet: 'Non défini',
       commaSeparated: 'valeurs séparées par des virgules',
