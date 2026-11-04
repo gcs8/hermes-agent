@@ -1,0 +1,196 @@
+name: Ryoko session busy qualification
+
+on:
+  pull_request:
+    branches: [ryoko/stable-0.22.7]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-linux-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: >-
+      ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'ryoko/stable-0.22.7' && github.repository == 'gcs8/hermes-agent' && github.repository_id == '1260443943' &&
+          github.actor == 'gcs8' && github.triggering_actor == 'gcs8' &&
+          github.event.pull_request.user.login == 'gcs8' &&
+          github.event.pull_request.head.repo.id == 1260443943 &&
+          github.event.pull_request.base.repo.id == 1260443943 &&
+          github.event.pull_request.head.ref == 'ci/session-busy-20261104' &&
+          github.event.pull_request.head.sha == vars.HERMES_BUSY_WORKFLOW_SHA &&
+          '2a0b47cfe657fdfd07c58cf15ace3f8f0a963a6c' == vars.HERMES_BUSY_SOURCE_SHA }}
+    runs-on: hermes-linux-qualification
+    timeout-minutes: 30
+    outputs:
+      report: ${{ steps.native.outputs.report }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: controls
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Allocate isolated state
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$(mktemp -d "$RUNNER_TEMP/hermes-0227.XXXXXXXX")"
+          mkdir -p "$root/home" "$root/tmp" "$root/state" "$root/evidence/setup" "$root/cache"
+          {
+            echo "QUALIFICATION_ROOT=$root"
+            echo "QUALIFICATION_EVIDENCE=$root/evidence"
+            echo "HOME=$root/home"
+            echo "TMPDIR=$root/tmp"
+            echo "HERMES_HOME=$root/state"
+            echo "HERMES_RUNTIME_DIR=$root/state/tools"
+            echo "HERMES_DISABLE_LAZY_INSTALLS=1"
+          } >> "$GITHUB_ENV"
+      - name: Bootstrap stdlib Python
+        id: bootstrap
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/hermes-0227-bootstrap
+        with:
+          python-version: '3.12.8'
+      - name: Test qualification controls without source dependencies
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$BOOTSTRAP_PYTHON" -I controls/scripts/ci/test_ryoko_stable_0227.py 2>&1 | tee "$QUALIFICATION_EVIDENCE/setup/control-tests.log"
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: 2a0b47cfe657fdfd07c58cf15ace3f8f0a963a6c
+          path: source
+          fetch-depth: 16
+          persist-credentials: false
+      - name: Verify source provenance before executing source commands
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          "$BOOTSTRAP_PYTHON" -I - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('control', 'controls/scripts/ci/ryoko_stable_0227.py')
+          control = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(control)
+          control.provenance(Path('source'))
+          PY
+      - name: Stage Node runtime library without privilege escalation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$QUALIFICATION_ROOT/libatomic"
+          cd "$QUALIFICATION_ROOT/libatomic"
+          test "$(dpkg --print-architecture)" = amd64
+          mkdir -p apt/lists/partial apt/cache/archives/partial
+          # Use only authenticated HTTPS Ubuntu metadata in the private job cache.
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: https://archive.ubuntu.com/ubuntu/' \
+            'Suites: noble noble-updates' \
+            'Components: main' \
+            'Architectures: amd64' \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' > ubuntu.sources
+          printf '%s\n' \
+            "Dir::State::lists \"$PWD/apt/lists\";" \
+            "Dir::Cache \"$PWD/apt/cache\";" \
+            "Dir::Etc::sourcelist \"$PWD/ubuntu.sources\";" \
+            'Dir::Etc::sourceparts "-";' \
+            'Debug::NoLocking "true";' \
+            'Acquire::Languages "none";' \
+            'APT::Update::Error-Mode "any";' \
+            '#clear APT::Update::Pre-Invoke;' \
+            '#clear APT::Update::Post-Invoke;' \
+            '#clear APT::Update::Post-Invoke-Success;' > apt.conf
+          apt-get -c "$PWD/apt.conf" update
+          apt-cache -c "$PWD/apt.conf" policy libatomic1 > "$QUALIFICATION_EVIDENCE/libatomic-policy.txt"
+          # apt verifies the archive against the fresh signed distribution index.
+          apt-get -c "$PWD/apt.conf" download libatomic1
+          shopt -s nullglob
+          packages=(*.deb)
+          test "${#packages[@]}" -eq 1
+          sha256sum "${packages[0]}" > "$QUALIFICATION_EVIDENCE/libatomic-package.sha256"
+          dpkg-deb --info "${packages[0]}" > "$QUALIFICATION_EVIDENCE/libatomic-package.txt"
+          dpkg-deb --extract "${packages[0]}" extracted
+          library="$QUALIFICATION_ROOT/libatomic/extracted/usr/lib/x86_64-linux-gnu"
+          test -f "$library/libatomic.so.1"
+          echo "LD_LIBRARY_PATH=$library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Prepare source-pinned Python and Node toolchains
+        id: toolchain
+        working-directory: source
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py prepare --toolchain all --home "$QUALIFICATION_ROOT/state" 2>&1 | tee "$QUALIFICATION_EVIDENCE/setup/toolchain-prepare.log"
+          env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_ENV="$GITHUB_ENV" GITHUB_PATH="$GITHUB_PATH" "$BOOTSTRAP_PYTHON" scripts/ci/setup_toolchain.py install --toolchain all --home "$QUALIFICATION_ROOT/state" 2>&1 | tee "$QUALIFICATION_EVIDENCE/setup/toolchain-install.log"
+      - name: Build isolated project test environment through PM
+        working-directory: source
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" HOME="$HOME" TMPDIR="$TMPDIR" HERMES_HOME="$HERMES_HOME" HERMES_RUNTIME_DIR="$HERMES_RUNTIME_DIR" HERMES_DISABLE_LAZY_INSTALLS=1 "$HERMES_PYTHON" -m pm.build_env --source . --out "$QUALIFICATION_ROOT/venv" --group dev --group test --cache "$QUALIFICATION_ROOT/cache" --explicit 2>&1 | tee "$QUALIFICATION_EVIDENCE/setup/pm-build.log"
+      - name: Execute bounded native qualification
+        id: native
+        env:
+          BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+          WORKFLOW_SHA: ${{ github.event.pull_request.head.sha }}
+          PINNED_NODE: ${{ steps.toolchain.outputs.node-path }}
+          PINNED_NPM: ${{ steps.toolchain.outputs.npm-path }}
+        run: |
+          set -euo pipefail
+          unset PYTHONPATH PYTHONHOME VIRTUAL_ENV __HERMES_ACTIVATED __HERMES_TEST_PYTHON __HERMES_TESTS_REEXEC
+          export HERMES_PYTHON="$QUALIFICATION_ROOT/venv/bin/python"
+          export PATH="$QUALIFICATION_ROOT/venv/bin:$PATH"
+          "$BOOTSTRAP_PYTHON" -I controls/scripts/ci/ryoko_stable_0227.py --source "$GITHUB_WORKSPACE/source" --evidence "$QUALIFICATION_EVIDENCE/native" --python "$HERMES_PYTHON" --node "$PINNED_NODE" --npm "$PINNED_NPM"
+      - name: Retain job-owned evidence only
+        if: always() && env.QUALIFICATION_ROOT != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ryoko-stable-0227-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_EVIDENCE }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  status:
+    needs: qualify
+    if: >-
+      ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'ryoko/stable-0.22.7' && github.repository == 'gcs8/hermes-agent' && github.repository_id == '1260443943' &&
+          github.actor == 'gcs8' && github.triggering_actor == 'gcs8' &&
+          github.event.pull_request.user.login == 'gcs8' &&
+          github.event.pull_request.head.repo.id == 1260443943 &&
+          github.event.pull_request.base.repo.id == 1260443943 &&
+          github.event.pull_request.head.ref == 'ci/session-busy-20261104' &&
+          github.event.pull_request.head.sha == vars.HERMES_BUSY_WORKFLOW_SHA &&
+          '2a0b47cfe657fdfd07c58cf15ace3f8f0a963a6c' == vars.HERMES_BUSY_SOURCE_SHA }}
+    runs-on: hermes-linux-qualification
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        id: bootstrap
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ runner.temp }}/hermes-0227-status
+        with:
+          python-version: '3.12.8'
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: controls
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Publish validated exact-source status from controls only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPORT: ${{ needs.qualify.outputs.report }}
+          RESULT: ${{ needs.qualify.result }}
+          WORKFLOW_SHA: ${{ github.event.pull_request.head.sha }}
+          STATUS_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
+        run: '"$STATUS_PYTHON" -I controls/scripts/ci/ryoko_stable_0227.py --status'
