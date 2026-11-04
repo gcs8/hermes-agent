@@ -138,6 +138,11 @@ def _relay_compute_host_rpc(message: dict) -> bool:
     """Relay host frames to the client while mirroring the server→client request the host has open, so a
     reconnecting client gets it back through ``open_requests``."""
     params = message.get("params") if isinstance(message, dict) else None
+    if message.get("method") == "compute_host.turn_state" and isinstance(params, dict):
+        from tui_gateway import server
+        from tui_gateway.compute_host_turn_state import mirror_turn_state
+        mirror_turn_state(server, params)
+        return True
     if isinstance(message, dict) and message.get("method") == "compute_host.activity":
         if isinstance(params, dict):
             session = _sessions.get(str(params.get("session_id") or ""))
@@ -285,10 +290,16 @@ def _apply_compute_host_metadata_mirror(session: dict, frame: dict | None) -> No
 
 def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -> None:
     with session["history_lock"]:
+        if local_turn_id := frame.get("local_turn_id"):
+            if (session.get("_compute_host_local_turn_id") != local_turn_id
+                    or session.get("_compute_host_turn_id")):
+                return
+            session.pop("_compute_host_local_turn_id", None)
         _compute_host_adopt_frame_meta(session, frame)
-        session["running"] = False
+        session["running"] = bool(session.get("_compute_host_local_turn_id"))
         session["last_active"] = time.time()
-        _clear_inflight_turn(session)
+        if not session["running"]:
+            _clear_inflight_turn(session)
         session.pop("_compute_host_open_request", None)
     # The isolated turn carried the queued model switch to the compute host, whose
     # turn thread applied it. Clear the server-side stash so it isn't re-forwarded
@@ -374,7 +385,7 @@ def _forward_correction_to_compute_host(sid: str, session: dict, verb: str, text
     (no isolated turn in flight, host gone, timeout, or the child reports ``unavailable``); the
     caller keeps its existing queue fallback for None.
     """
-    if not (session.get("running") and session.get("_compute_host_turn_id")
+    if not (session.get("running") and (session.get("_compute_host_turn_id") or session.get("_compute_host_local_turn_id"))
             and _session_uses_compute_host(session)):
         return None
     try:

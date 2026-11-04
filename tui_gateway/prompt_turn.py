@@ -1156,6 +1156,9 @@ def _run_prompt_submit(
     # frames are the same here and in a compute-host child; dropped in run_body's finally.
     from tui_gateway.stream_segments import SESSION_KEY, TurnSegments  # bound functions run in server's globals
     session[SESSION_KEY] = segments = TurnSegments()
+    from tui_gateway.compute_host_turn_state import publish_turn_state
+    with session["history_lock"]:
+        publish_turn_state(session, sid, segments.turn_id, True)
     if not muted:
         _emit("message.start", sid)
 
@@ -1215,6 +1218,7 @@ def _run_prompt_submit(
                     _release_hosted_room_turn_slot(session)
                     if session.get(SESSION_KEY) is segments:
                         session.pop(SESSION_KEY)
+                    publish_turn_state(session, sid, segments.turn_id, False)
                 # Closing bookend of "tui prompt accepted" — exactly one per accepted prompt.
                 # agent.session_id is re-read because compression may have rotated it (an
                 # accepted/finished pair whose id changed IS a rotation trace).
@@ -1265,6 +1269,7 @@ def _run_prompt_submit(
             session["running"] = False
             if session.get(SESSION_KEY) is segments:
                 session.pop(SESSION_KEY)
+            publish_turn_state(session, sid, segments.turn_id, False)
     return can_start
 
 
