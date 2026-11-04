@@ -60,7 +60,9 @@ jobs:
       - name: Test qualification controls without source dependencies
         env:
           BOOTSTRAP_PYTHON: ${{ steps.bootstrap.outputs.python-path }}
-        run: '"$BOOTSTRAP_PYTHON" -I controls/scripts/ci/test_ryoko_stable_0227.py'
+        run: |
+          set -euo pipefail
+          "$BOOTSTRAP_PYTHON" -I controls/scripts/ci/test_ryoko_stable_0227.py 2>&1 | tee "$QUALIFICATION_EVIDENCE/setup/control-tests.log"
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           ref: bb58a419f8f5e0bee20b05445bad0d99e9a09eff

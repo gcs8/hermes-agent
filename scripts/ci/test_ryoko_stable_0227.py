@@ -178,6 +178,7 @@ class Contracts(unittest.TestCase):
 
     def test_library_bootstrap_emitted_shell(self):
         shell = self.library_shell()
+        loader = os.pathsep.join(filter(None, ("existing-python-loader", os.environ.get("LD_LIBRARY_PATH", ""))))
         binary = self.root / "bin"
         binary.mkdir()
         stub = binary / "native-stub"
@@ -239,7 +240,7 @@ else:
                 output.touch()
                 env = {"PATH": f"{binary}:/usr/bin:/bin", "QUALIFICATION_ROOT": str(root),
                        "QUALIFICATION_EVIDENCE": str(root / "evidence"), "GITHUB_ENV": str(output),
-                       "LD_LIBRARY_PATH": "existing-python-loader", "CALLS": str(root / "calls")}
+                       "LD_LIBRARY_PATH": loader, "CALLS": str(root / "calls")}
                 candidate = shell
                 if case == "update-fails": env["FAIL_UPDATE"] = "1"
                 if case == "unsigned-source": candidate = candidate.replace("Signed-By:", "Unsigned:")
@@ -253,12 +254,28 @@ else:
                     self.assertEqual([row[0] for row in calls],
                                      ["dpkg", "apt-get", "apt-cache", "apt-get", "dpkg-deb", "dpkg-deb"])
                     expected = root / "libatomic/extracted/usr/lib/x86_64-linux-gnu"
-                    self.assertEqual(output.read_text(), f"LD_LIBRARY_PATH={expected}:existing-python-loader\n")
+                    self.assertEqual(output.read_text(), f"LD_LIBRARY_PATH={expected}:{loader}\n")
                     self.assertTrue((root / "evidence/libatomic-package.sha256").is_file())
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(output.read_text(), "")
                     self.assertFalse(any(row[0] == "dpkg-deb" for row in calls))
+
+    def test_control_log_retains_native_failure(self):
+        name = "Test qualification controls without source dependencies"
+        part = WORKFLOW.split("      - name: " + name + "\n", 1)[1].split("      - uses:", 1)[0]
+        shell = "\n".join(line[10:] for line in part.split("        run: |\n", 1)[1].splitlines()) + "\n"
+        evidence = self.root / "evidence"
+        (evidence / "setup").mkdir(parents=True)
+        stub = self.root / "control-stub"
+        stub.write_text("#!/bin/sh\nprintf 'synthetic native control failure\\n'\nexit 73\n")
+        stub.chmod(0o700)
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", shell],
+                                env={"PATH": "/usr/bin:/bin", "BOOTSTRAP_PYTHON": str(stub),
+                                     "QUALIFICATION_EVIDENCE": str(evidence)},
+                                capture_output=True, text=True, timeout=15, check=False)
+        self.assertEqual(result.returncode, 73)
+        self.assertEqual((evidence / "setup/control-tests.log").read_text(), "synthetic native control failure\n")
 
     def test_workflow_boundaries(self):
         self.assertEqual(WORKFLOW.count("runs-on: hermes-linux-qualification"), 2)
