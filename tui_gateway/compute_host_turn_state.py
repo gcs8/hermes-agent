@@ -20,14 +20,14 @@ def publish_turn_state(session: dict, sid: str, turn_id: str, running: bool) -> 
 def mirror_turn_state(server: Any, params: dict) -> None:
     sid = str(params.get("session_id") or "")
     session = server._sessions.get(sid)
-    if session is None or not server._session_uses_compute_host(session):
+    if session is None:
         return
     turn_id = params.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
         return
     with session["history_lock"]:
         if params.get("running"):
-            if session.get("_closing"):
+            if session.get("_closing") or not server._session_uses_compute_host(session):
                 return
             session["_compute_host_local_turn_id"] = turn_id
             session["running"] = True

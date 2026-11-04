@@ -157,6 +157,32 @@ def test_host_crash_releases_automatic_busy_mirror(automatic_turn):
     assert lane.supervisor._local_turns == {}
 
 
+@pytest.mark.parametrize("settlement", ["completion", "crash"])
+def test_automatic_turn_settles_after_isolation_is_disabled(automatic_turn, monkeypatch, settlement):
+    lane = automatic_turn
+    lane.relay()
+    assert lane.parent["running"] is True
+    assert lane.parent.get("_compute_host_local_turn_id")
+    monkeypatch.setattr(server, "_load_dashboard_process_isolation_config", lambda: {"turn_isolation": False})
+    if settlement == "crash":
+        lane.supervisor._fail_pending_turns(reason="crash", message="synthetic host exit")
+    else:
+        lane.finish()
+    assert lane.parent.get("_compute_host_local_turn_id") is None, "local turn id stranded"
+    assert lane.parent["running"] is False
+    assert lane.supervisor._local_turns == {}
+
+
+def test_disabled_isolation_does_not_admit_a_new_automatic_busy_mirror(automatic_turn, monkeypatch):
+    lane = automatic_turn
+    monkeypatch.setattr(server, "_load_dashboard_process_isolation_config", lambda: {"turn_isolation": False})
+    lane.relay()
+    assert lane.parent["running"] is False
+    assert lane.parent.get("_compute_host_local_turn_id") is None
+    lane.finish()
+    assert lane.parent["running"] is False
+
+
 def test_older_routed_completion_cannot_idle_an_automatic_turn(automatic_turn):
     lane = automatic_turn
     lane.relay()
